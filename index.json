@@ -7,7 +7,7 @@
       "id": "muto_ped_rig",
       "name": "Muto Ped Rig",
       "tagline": "Rig humanoid characters to the GTA V ped skeleton for FiveM",
-      "version": "0.2.1",
+      "version": "1.1.0",
       "type": "add-on",
       "maintainer": "muto",
       "license": [
@@ -22,9 +22,9 @@
         "Rigging",
         "Import-Export"
       ],
-      "archive_url": "./muto_ped_rig-0.2.1.zip",
-      "archive_size": 1393298,
-      "archive_hash": "sha256:d26d842ed149402d7e9f3b2a1873d08ebd85cf588afd5c619a2d83fc4c0778d8"
+      "archive_url": "./muto_ped_rig-1.1.0.zip",
+      "archive_size": 1419321,
+      "archive_hash": "sha256:f92bb465196e906c9c79e68a5efb7d13fe647608c0f4b624e6cd48f41b61f174"
     }
   ]
 }
