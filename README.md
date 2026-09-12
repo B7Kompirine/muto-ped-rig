@@ -24,7 +24,7 @@ Written from scratch; contains no Auto-Rig Pro code.
 | 2 | **Fit Skeleton** | Builds the 128-bone freemode skeleton in the character's own pose (names, tags, parents and count never change). |
 | 3 | **Compute Weights** | Transfers vanilla ped weights to the character; 12 vanilla bodies vote on the limbs. |
 | 4 | **Convert to GTA Rest Pose** | Moves the mesh and skeleton into the GTA rest pose with vanilla rotations (required for T-pose characters). |
-| – | **Validate** | Skeleton signature + ≤4 influences / unweighted vertices + vertex color layer `Color 2` (wind/sweat; non-zero makes the ped jitter in game). |
+| – | **Validate** | Skeleton signature + ≤4 influences / unweighted vertices + vertex color layer `Color 2` (wind/sweat; painted non-zero values make the ped jitter in game, a flat layer is reset by the export). |
 | 5 | **Export to Sollumz + Test Resource** | Splits into head/uppr/lowr drawables and assigns ped materials; textures go into `<ped>.ytd` under GTA names (like vanilla peds), single-variation `.ymt`, physics-free `.yft` + `.ydd`; resource with a `/mprped` command (add-on ped: `/<ped name>`). |
 
 The character must **stand upright, face -Y and be in meters** (in Blender's front view its face looks at you). Otherwise run
@@ -121,7 +121,9 @@ Select only the body: a weapon or prop that sticks out (e.g. an axe held over th
   `uppr_diff_000_a_uni`, `lowr_diff_000_a_uni` + `_normal_000` / `_spec_000`); the add-on writes DDS files under these names into
   `<ped>.ytd` instead of embedding them in the `.ydd`. *Embedded (Legacy)*: the color texture is embedded in the `.ydd` under its own name, no `.ytd`.
 - **Vertex colors** (export, automatic): missing `Color 1` / `Color 2` layers are created like on vanilla peds — `Color 1` = `FF8000`
-  (lighting), `Color 2` = `0,0,0,0` (wind/sweat off). Existing layers are kept; *Validate* warns when `Color 2` is not zero.
+  (lighting), `Color 2` = `0,0,0,0` (wind/sweat off). Existing layers are kept, except a `Color 2` with one flat non-zero value on every
+  corner — for example the white layer Sollumz adds with *Create Shader Material* (ped / ped_default) — which is reset to `0,0,0,0`
+  (a white `Color 2` makes the ped jitter in game). *Validate* warns when a painted `Color 2` is not zero.
 
 ## Testing in game
 

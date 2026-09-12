@@ -317,7 +317,7 @@ class MPR_OT_validate(_ObjectModeOperator, bpy.types.Operator):
             self.report({"ERROR"}, "MPR_Rig not found")
             return {"CANCELLED"}
         tpl = io.template()
-        problems = []
+        problems, notes = [], []
         bones = {b.name: b for b in arm.data.bones}
         if len(bones) != len(tpl.names):
             problems.append(f"bone count {len(bones)} != {len(tpl.names)}")
@@ -348,18 +348,24 @@ class MPR_OT_validate(_ObjectModeOperator, bpy.types.Operator):
                     problems.append(f"{o.name}: {over} vertices with more than 4 bones")
                 if empty:
                     problems.append(f"{o.name}: {empty} vertices without weights")
-            from .sollumz_setup import wind_layer_report
+            from .sollumz_setup import wind_layer_report, wind_layer_uniform
             for o in objs:
                 wind = wind_layer_report(o.data)
-                if wind:
-                    # export keeps an existing "Color 2"; non-zero means wind/sweat in game -> jitter (measured 2026-09-12)
+                if wind and wind_layer_uniform(o.data):
+                    # one flat value = unpainted default (Sollumz 'Create Shader Material' adds it white); export resets it (2026-09-13)
+                    notes.append(f"{o.name}: 'Color 2' is one flat value (e.g. added by Sollumz with a ped shader) — export resets it to 0")
+                elif wind:
+                    # painted "Color 2" is kept by the export; non-zero means wind/sweat in game -> jitter (measured 2026-09-12)
                     problems.append(f"{o.name}: 'Color 2' is non-zero on {wind * 100:.0f}% of corners (wind/sweat) -> jitter in game")
+        tail = "".join(f" | {n}" for n in notes)
+        for n in notes:
+            print("[muto_ped_rig] NOTE:", n)
         if problems:
             for p in problems[:20]:
                 print("[muto_ped_rig] PROBLEM:", p)
-            self.report({"WARNING"}, f"{len(problems)} problems (first: {problems[0]})")
+            self.report({"WARNING"}, f"{len(problems)} problems (first: {problems[0]})" + tail)
         else:
-            self.report({"INFO"}, "Clean: signature matches, weight rules OK")
+            self.report({"INFO"}, "Clean: signature matches, weight rules OK" + tail)
         return {"FINISHED"}
 
 
@@ -423,6 +429,11 @@ class MPR_OT_sollumz_export(_MeshOperator, bpy.types.Operator):
         lost = sorted({n for v in tex_rep.values() for n in v["missing"]})
         if lost:
             notes.append(f"textures not found on disk: {', '.join(lost[:4])}{' ...' if len(lost) > 4 else ''}")
+        reset = sorted({re.sub(r"\.(head|uppr|lowr)$", "", o.name) for o in dic.children_recursive
+                        if o.type == "MESH" and o.data.get("mpr_wind_reset")})
+        if reset:
+            msg += (f" | 'Color 2' reset to 0 on {', '.join(reset[:4])}{' ...' if len(reset) > 4 else ''} "
+                    "(it was one flat value, e.g. added by Sollumz; wind/sweat off, no jitter)")
         no_uv = sorted({re.sub(r"\.(head|uppr|lowr)$", "", o.name) for o in dic.children_recursive if o.get("mpr_no_uv")})
         if no_uv:
             notes.append(f"no UVs: {', '.join(no_uv[:4])}{' ...' if len(no_uv) > 4 else ''} — the texture shows as one color and the file grows ~4x; unwrap UVs first")

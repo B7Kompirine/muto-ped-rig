@@ -176,12 +176,33 @@ def ped_material_for(src_mat, cache, tex_dir=None):
 # Olculdu (2026-09-12, tools/t_vcolor_probe.py): vanilla a_m_y_beach_01 5 cizimde Colour0 B 0 / A 255 (R ~245, G ~120), Colour1 hep 0;
 # ikisini beyaz (255,255,255,255) acan eski kod -> muto_winter oyunda siddetli titreme, Colour1 0 olan sauron/test ped titremiyor.
 # Sollumz docs (basic-clothes-editing): Color 1 FF8000, Color 2 #000 alfa 0.
+# Olculdu (2026-09-13, tools/t_ped_shader_flow.py, kullanici raporu "ped / ped_default shader ekleyince"): Sollumz 'Create Shader
+# Material' mevcut kose rengini "Color 1"e YENIDEN ADLANDIRIR (WS: Unreal PSKVTXCOL_0) ve eksik "Color 2"yi DOLDURMADAN acar; Blender yeni
+# BYTE_COLOR katmanini BEYAZ (1,1,1,1) baslatir -> eski export katmani korudugu icin head/uppr/lowr "Color 2" %100 beyaz = oyunda
+# titreme. Tek duze (her kosede ayni) sifir olmayan "Color 2" boyanmamis varsayilandir -> 0'a cekilir; boyanmis (degisken) korunur.
 LAYER_DEFAULT_SRGB = {"Color 1": (1.0, 128 / 255, 0.0, 1.0), "Color 2": (0.0, 0.0, 0.0, 0.0)}
+
+
+def _uniform_srgb(ca):
+    """Katmanin tum koseleri ayni sRGB degerdeyse o deger (4'lu), degilse ya da katman yoksa None."""
+    if ca is None or len(ca.data) == 0:
+        return None
+    buf = np.empty(len(ca.data) * 4, dtype=np.float32)
+    ca.data.foreach_get("color_srgb", buf)
+    c = buf.reshape(-1, 4)
+    return tuple(float(v) for v in c[0]) if np.all(c == c[0]) else None
+
+
+def wind_layer_uniform(me):
+    """"Color 2" tek duze ve sifir disi mi (boyanmamis varsayilan; export 0'a ceker -> Validate sorun saymaz)."""
+    u = _uniform_srgb(me.color_attributes.get("Color 2"))
+    return u is not None and any(v > 0.5 / 255 for v in u)
 
 
 def prepare_mesh_layers(me):
     """Ped shader'inin bekledigi katmanlar. Donus: mesh'te hic UV yok muydu (bos UV acildi -> doku tek renk gorunur ve Face Corner
-    export'ta kose paylasimi olmaz; olculdu 2026-09-11: 233k vertex'lik UV'siz mesh -> vertex = 3 x ucgen, .ydd 31 MB)."""
+    export'ta kose paylasimi olmaz; olculdu 2026-09-11: 233k vertex'lik UV'siz mesh -> vertex = 3 x ucgen, .ydd 31 MB).
+    Tek duze sifir olmayan "Color 2" (orn. Sollumz'un ped shader eklerken actigi beyaz katman) 0'a cekilir -> me["mpr_wind_reset"]."""
     no_uv = len(me.uv_layers) == 0
     if no_uv:
         me.uv_layers.new(name="UVMap 0")
@@ -196,6 +217,9 @@ def prepare_mesh_layers(me):
         if ca is None:
             ca = me.color_attributes.new(cname, "BYTE_COLOR", "CORNER")
             ca.data.foreach_set("color_srgb", np.tile(np.array(LAYER_DEFAULT_SRGB[cname], dtype=np.float32), len(ca.data)))
+        elif cname == "Color 2" and wind_layer_uniform(me):
+            ca.data.foreach_set("color_srgb", np.tile(np.array(LAYER_DEFAULT_SRGB[cname], dtype=np.float32), len(ca.data)))
+            me["mpr_wind_reset"] = 1
     return no_uv
 
 
