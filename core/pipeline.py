@@ -1,5 +1,6 @@
 """Uctan uca agirlik hatti (Blender'siz): referans govde aktarimi + kurallar + kemik birlestirme."""
 import os
+import re
 import numpy as np
 from .skeleton import Skeleton, complete_skeleton, map_to_canon
 from .fit import fit_skeleton
@@ -10,10 +11,14 @@ from . import voxel as vx
 DATA = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
 
-def remap_rules(names, merge_face=True, merge_roll=False, merge_mh=False, merge_other=True):
-    """Kemik adi -> hedef ad (birlestirme). Yuz kapaliysa FB_/FACIAL_ -> SKEL_Head."""
+def remap_rules(names, merge_face=True, merge_roll=False, merge_mh=False, merge_other=True, merge_fingers=False):
+    """Kemik adi -> hedef ad (birlestirme). Yuz kapaliysa FB_/FACIAL_ -> SKEL_Head; parmaklar kapaliysa Finger* -> ayni tarafin SKEL_*_Hand."""
     rules = {}
     for n in names:
+        m = re.match(r"SKEL_([LR])_Finger\d\d$", n)
+        if merge_fingers and m:
+            rules[n] = f"SKEL_{m.group(1)}_Hand"
+            continue
         if merge_face and (n.startswith("FB_") or n.startswith("FACIAL_")):
             rules[n] = "SKEL_Head"
         elif merge_roll and n.startswith("RB_"):
@@ -194,7 +199,7 @@ def head_attached_parts(W, Vw, Fw, tpl, fit):
 
 def transfer_pipeline(Vt, Ft, tpl, fit, ref_key="auto", merge_face=True, merge_roll=False,
                       merge_mh=False, use_votes=True, lam=0.8, data_dir=None, exclude=(), head_parts=True, fill=True, fill_near=0.02, fill_far=0.07, islands=True, fill_groups="arms",
-                      log=print):
+                      merge_fingers=False, log=print):
     """Hedef mesh (P pozunda) icin yogun agirlik (N, B) + temel referans mesafesi.
 
     Olculmus hat (birini-disarida-birak, 12 vanilla govde, 2026-09-11):
@@ -275,7 +280,7 @@ def transfer_pipeline(Vt, Ft, tpl, fit, ref_key="auto", merge_face=True, merge_r
     # REDDEDILDI (2026-09-11): ayri giysi parcasina alttaki govdenin agirligini tasima (k=8 normal uyumlu ters mesafe). Sentetik bol
     # pantolonda (t_synth_e2e shell=pants shell_off=0.05, kaynak vertex'le birebir eslesme) poz boslugu degisimi %95 4.0 -> 6.1 mm,
     # max 7.2 -> 29.7 mm kotulesti; 12 vanilla govde LOO %95 0.71 -> 0.74. Referans aktarimi ayri giysiyi zaten govdeyle tasiyor.
-    W = apply_remap(W, tpl, remap_rules(tpl.names, merge_face, merge_roll, merge_mh))
+    W = apply_remap(W, tpl, remap_rules(tpl.names, merge_face, merge_roll, merge_mh, merge_fingers=merge_fingers))
     log(f"  aktarim: temel={base}, {len(Vw)} birlesik vertex, referansa mesafe %95 {np.percentile(dist, 95)*1000:.1f} mm, "
         f"guven<0.5 %{(conf < 0.5).mean()*100:.1f}, {time.time()-t0:.1f}s")
     return W[inv], dist[inv]

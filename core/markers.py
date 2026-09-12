@@ -119,6 +119,12 @@ def expand_targets(tpl, markers):
             if all(k in m for k in chain):
                 for k in chain:
                     T[DIRECT[k]] = m[k]
+            elif chain[0] in m:
+                # yalniz kok (autodetect.palm_markers: isaret/serce koku) -> fit el donusunu bundan hesaplar
+                T[DIRECT[chain[0]]] = m[chain[0]]
+    for k, v in m.items():                               # yuz sablon kaydi (core/headreg): kemik adi = anahtar, tum alt agac birlikte
+        if k.startswith(("FB_", "FACIAL_")) and k in tpl.index:
+            T[k] = v
     return T
 
 

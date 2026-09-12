@@ -3,7 +3,26 @@ Python cagrisi (olculdu: 6251 vertex x 12 referans = 10.5 s). Bu surum vektorel,
 
 Tamlik: sorgunun hucresi etrafinda r hucrelik kup tarandi ise, kup disindaki her nokta sorguya >= r*c uzaktadir.
 k'inci aday mesafesi <= r*c ise sonuc kesin; degilse o sorgular r buyutulerek tekrar taranir."""
+import os
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
+
+WORKERS = min(8, os.cpu_count() or 1)   # nearest parcalari is parcaciklarinda (numpy GIL'i birakir); sonuc parcalamadan bagimsiz; 1 = seri
+_POOL = None
+
+
+def _map(fn, items):
+    """fn(item) her parca icin (sonucu kendi dizisine yazar); hata cagirana gecer. Tek parca ya da WORKERS <= 1 -> seri."""
+    global _POOL
+    items = list(items)
+    if WORKERS <= 1 or len(items) <= 1:
+        for it in items:
+            fn(it)
+        return
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(max_workers=WORKERS)
+    for _ in _POOL.map(fn, items):
+        pass
 
 
 class GridKNN:
@@ -83,4 +102,89 @@ class GridKNN:
                 o = np.argpartition(d2, k - 1)[:k]
                 o = o[np.argsort(d2[o])]
                 D[q], I[q] = np.sqrt(d2[o]), o
+        return D, I
+
+    def _nearest_r(self, Q, r):
+        n = len(Q)
+        qi = np.floor((Q - self.lo) / self.c).astype(np.int64)
+        rng = np.arange(-r, r + 1)
+        off = np.stack(np.meshgrid(rng, rng, rng, indexing="ij"), -1).reshape(-1, 3)
+        cells = qi[:, None, :] + off[None, :, :]
+        inside = np.all((cells >= 0) & (cells < self.dims), axis=2)
+        keys = np.where(inside, self._key(np.clip(cells, 0, self.dims - 1)), -1)
+        start = np.searchsorted(self.skey, keys, side="left")
+        end = np.searchsorted(self.skey, keys, side="right")
+        cnt = np.where(inside, end - start, 0).ravel()
+        tot = cnt.reshape(n, -1).sum(1)
+        D = np.full(n, np.inf)
+        I = np.zeros(n, dtype=np.int64)
+        has = tot > 0
+        if not has.any():
+            return D, I, has
+        qrow = np.repeat(np.repeat(np.arange(n), off.shape[0]), cnt)           # sorgu sirasinda gruplu
+        st = np.repeat(start.ravel(), cnt)
+        csum = np.cumsum(cnt) - cnt
+        cand = self.order[st + np.arange(cnt.sum()) - np.repeat(csum, cnt)]
+        d2 = np.sum((self.P[cand] - Q[qrow]) ** 2, axis=1)
+        tot_h = tot[has]
+        mins = np.minimum.reduceat(d2, np.cumsum(tot_h) - tot_h)
+        grp = np.repeat(np.arange(len(tot_h)), tot_h)
+        hit = np.flatnonzero(d2 == mins[grp])
+        _, pos = np.unique(grp[hit], return_index=True)                       # grup basina ilk minimum
+        D[has] = np.sqrt(mins)
+        I[has] = cand[hit[pos]]
+        return D, I, np.isfinite(D) & (D <= r * self.c)
+
+    def _nearest_brute(self, Q, budget=100_000):
+        """Kaba kuvvet k=1 (matmul, merkezli koordinat; parca <= budget eleman, parcalar _map ile paralel). Mesafe secilen noktadan
+        tam hesaplanir. Yerinde -2M + PP == PP - 2M (IEEE: 2 ile carpma ve isaret degistirme tam) -> eski yolla ayni sonuc.
+        Olculdu (michelle kafa taramasi, 2293 nokta x 24k sorgu): 2M parca seri 1,53 s -> 100k parca 8 is parcacigi 0,14 s, mesafe ve
+        secilen nokta birebir (Auto Markers'in %87-90'i bu cagri: xbot el, michelle yuz profili)."""
+        if not hasattr(self, "_Pc"):
+            self._Pc = self.P - self.lo
+            self._PP = np.einsum("ij,ij->i", self._Pc, self._Pc)
+        D = np.empty(len(Q))
+        I = np.empty(len(Q), dtype=np.int64)
+        ch = max(64, int(budget // max(len(self.P), 1)))
+
+        def job(a):
+            q = Q[a:a + ch] - self.lo
+            M = q @ self._Pc.T
+            M *= -2.0
+            M += self._PP
+            j = np.argmin(M, axis=1)
+            I[a:a + ch] = j
+            D[a:a + ch] = np.linalg.norm(self._Pc[j] - q, axis=1)
+        _map(job, range(0, len(Q), ch))
+        return D, I
+
+    def nearest(self, Q, chunk=1024, max_r=64, brute=5e7, brute_p=4096):
+        """k=1 hizli yol (ICP): query(Q, 1) ile ayni tam sonuc, lexsort yerine grup-ici minimum. -> (D (n,), I (n,))
+        Nokta kumesi <= brute_p ise dogrudan kaba kuvvet (olculdu: el bolgesi 1509 nokta, 165 aday x 300 sorgu: izgara 14,8 s'nin 13,8'i);
+        r=1 halkasinda bulunamayan (uzak) sorgular: kalan x nokta sayisi <= brute ise kaba kuvvet — halka buyutmekten ucuz."""
+        Q = np.asarray(Q, dtype=np.float64)
+        if len(self.P) <= brute_p:
+            return self._nearest_brute(Q)
+        D = np.full(len(Q), np.inf)
+        I = np.zeros(len(Q), dtype=np.int64)
+        todo = np.arange(len(Q))
+        r = 1
+        while len(todo) and r <= max_r:
+            if r > 2 or (r > 1 and len(todo) * len(self.P) <= brute):
+                break                     # uzak kalanlar kaba kuvvete (olculdu: 9000 nokta, 20 cm uzak 20k sorgu, halka r=64'e: 196 s)
+            ch = max(16, int(chunk * 27 / (2 * r + 1) ** 3))
+            starts = list(range(0, len(todo), ch))
+            nxt = [None] * len(starts)
+
+            def job(k, todo=todo, ch=ch, r=r, starts=starts, nxt=nxt):      # sorgu basina sonuc parcadan bagimsiz -> paralel
+                idx = todo[starts[k]:starts[k] + ch]
+                d, i, ok = self._nearest_r(Q[idx], r)
+                D[idx[ok]] = d[ok]
+                I[idx[ok]] = i[ok]
+                nxt[k] = idx[~ok]
+            _map(job, range(len(starts)))
+            todo = np.concatenate(nxt) if nxt else todo[:0]
+            r *= 2
+        if len(todo):
+            D[todo], I[todo] = self._nearest_brute(Q[todo])
         return D, I

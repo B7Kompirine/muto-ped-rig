@@ -16,9 +16,22 @@ class MPR_Settings(bpy.types.PropertyGroup):
         name="Multi-Body Limb Voting", default=True,
         description="12 vanilla bodies vote on the limb of each vertex, so one body's wrong limb choice is outvoted "
                     "(measured: the 95th percentile error dropped on all 6 targets)")
-    merge_face: bpy.props.BoolProperty(
-        name="Merge Face Bones into Head", default=True,
-        description="No weights on FB_ face bones, everything goes to SKEL_Head (no facial animation)")
+    detail_fingers: bpy.props.BoolProperty(
+        name="Fingers", default=True,
+        description="Weight the 30 finger bones and find the fingertips on the mesh. Off: finger weights go to the hand bone "
+                    "(fingers move with the hand as one piece); the finger bones still exist, so the skeleton stays valid")
+    hand_template: bpy.props.BoolProperty(
+        name="Hand Template", default=True,
+        description="Auto Markers: place the 15 finger joints by fitting the vanilla GTA hand meshes to the character's hands "
+                    "(takes a few seconds). Off: finger joints come from fingertip detection only")
+    detail_face: bpy.props.BoolProperty(
+        name="Face", default=True,
+        description="Weight the 19 animated face bones (jaw, lips, eyes, lids, brows, cheeks, tongue) from the vanilla references "
+                    "that carry face weights. Off: all face weights go to SKEL_Head (no facial animation); the face bones still exist")
+    face_template: bpy.props.BoolProperty(
+        name="Face Template", default=True,
+        description="Auto Markers: place the 22 face bones by fitting the vanilla GTA head meshes to the character's head "
+                    "(takes several seconds). Off: the face bones follow the head with the template's offsets")
     merge_roll: bpy.props.BoolProperty(
         name="Disable Roll Bones", default=False,
         description="Do not weight RB_ twist bones. Off by default: distributed like vanilla; "

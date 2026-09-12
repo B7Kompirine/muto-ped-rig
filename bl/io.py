@@ -63,6 +63,8 @@ def marker_collection(create=True):
     c = bpy.data.collections.get(MARKER_COLL)
     if c is None and create:
         c = bpy.data.collections.new(MARKER_COLL)
+    if c is not None and create and bpy.context.scene.collection.children.get(c.name) is None:
+        # baska sahnede olusmus olabilir -> aktif sahneye de bagla (olculdu: cok sahneli dosyada Auto Markers'in marker'lari gorunmuyordu)
         bpy.context.scene.collection.children.link(c)
     return c
 
@@ -82,6 +84,19 @@ def set_markers(positions, size):
         o.location = [float(x) for x in p]
 
 
+def remove_markers(keys):
+    """Anahtari keys icinde olan marker nesnelerini sil (Auto Markers: kapatilan secenekten kalan eski hedefler). -> silinen sayi"""
+    coll = marker_collection(create=False)
+    if coll is None:
+        return 0
+    keys, n = set(keys), 0
+    for o in list(coll.objects):
+        if o.get("mpr_key") in keys:
+            bpy.data.objects.remove(o, do_unlink=True)
+            n += 1
+    return n
+
+
 def read_markers():
     coll = marker_collection(create=False)
     if coll is None:
@@ -93,6 +108,9 @@ def read_markers():
 def get_or_append_rig():
     arm = bpy.data.objects.get(RIG_NAME)
     if arm is not None:
+        if bpy.context.scene.objects.get(arm.name) is None:
+            # baska sahnede olusmus: aktif sahneye bagla (olculdu: cok sahneli dosyada Fit Skeleton "ViewLayer does not contain MPR_Rig")
+            bpy.context.scene.collection.objects.link(arm)
         return arm
     with bpy.data.libraries.load(TEMPLATE_BLEND, link=False) as (src, dst):
         dst.objects = [n for n in src.objects if n.startswith("MPR_TEMPLATE_")]

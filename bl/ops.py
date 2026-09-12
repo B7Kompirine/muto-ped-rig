@@ -88,11 +88,37 @@ class MPR_OT_markers_auto(_MeshOperator, bpy.types.Operator):
             self.report({"ERROR"}, f"Automatic detection failed: {e} — place the markers by hand with 'Add Markers'")
             return {"CANCELLED"}
         H = float(np.ptp(V[:, 2]))
-        xc = float(0.5 * (V[:, 0].min() + V[:, 0].max()))
+        xc = float(_info["xc"])         # algilamanin kullandigi orta hat (autodetect.CENTER_MODE)
         det = ad.apply_calibration(det, ad.load_calibration(), H, xc)
-        io.set_markers(det, context.scene.mpr.marker_size)
+        s = context.scene.mpr
+        notes = []                      # rapor: kapidan donen sablonlar (kullanici neden mesh tabanli sonucu gordugunu bilsin)
+        if s.detail_fingers:
+            # parmak uclari / orta zincir / avuc yonu / bogum (autodetect) + istege bagli el sablon kaydi (core/handreg)
+            from ..core import handreg
+            handreg.LAST.clear()
+            det.update(ad.palm_markers(V, det, io.template(), F, hand_reg=s.hand_template))
+            skipped = sorted(S for S, d in handreg.LAST.items() if d.get("rejected")) if s.hand_template else []
+            if skipped:
+                side = {"L": "left", "R": "right"}
+                notes.append(f"Hand Template skipped for the {' and '.join(side[S] for S in skipped)} hand (it did not fit; mesh-based fingers kept)")
+        if s.detail_face and s.face_template:
+            from ..core import headreg
+            headreg.LAST.clear()
+            fm = headreg.head_markers(V, det, io.template())              # 22 yuz kemigi (FB_/FACIAL_) kafa sablon kaydindan
+            if headreg.LAST.get("rejected"):
+                notes.append("Face Template skipped (the head does not match the GTA heads)")
+            det.update(fm)
+            if "FACIAL_facialRoot" in fm:
+                # GTA'da facialRoot = SKEL_Head konumu (12 sablon); kayit Head'i 2,03 -> 1,29 cm iyilestiriyor (tests/an_headreg.py head=1)
+                det["head"] = fm["FACIAL_facialRoot"]
+        is_face = lambda k: k.startswith(("FB_", "FACIAL_"))
+        is_finger = lambda k: len(k) == 5 and k[0] in "LR" and k[1:3] == "_f" and k[3:].isdigit()
+        # kapatilan secenekten kalan parmak/yuz marker'lari Fit'e eski hedef olmasin
+        io.remove_markers([k for k in io.read_markers() if k not in det and (is_face(k) or is_finger(k))])
+        io.set_markers({k: v for k, v in det.items() if not is_face(k)}, s.marker_size)
+        io.set_markers({k: v for k, v in det.items() if is_face(k)}, s.marker_size * 0.3)   # yuz kemikleri 1-2 cm arali
         context.scene.mpr.mirror_x = xc
-        msg = f"{len(det)} markers found ({time.time()-t0:.1f}s) — check them and drag to adjust"
+        msg = f"{len(det)} markers found ({time.time()-t0:.1f}s) — check them and drag to adjust" + "".join(f" | {n}" for n in notes)
         rigged = [o.name for o in objs if o.data.shape_keys is not None or any(
             m.type == "ARMATURE" and (m.object is None or m.object.name != io.RIG_NAME) for m in o.modifiers)]
         if rigged:
@@ -120,12 +146,16 @@ class MPR_OT_fix_orientation(_MeshOperator, bpy.types.Operator):
         if not chk["problems"]:
             self.report({"INFO"}, f"Orientation and scale are already fine (height {chk['height']:.2f} m)")
             return {"FINISHED"}
-        if chk["rot_z_deg"] == 0.0 and chk["scale"] == 1.0:
+        if chk["rot_z_deg"] == 0.0 and chk["scale"] == 1.0 and chk.get("rot_x_deg", 0.0) == 0.0:
             self.report({"ERROR"}, "Cannot be fixed automatically: " + "; ".join(chk["problems"]))
             return {"CANCELLED"}
         lo, hi = V.min(0), V.max(0)
-        pivot = Matrix.Translation((float((lo[0] + hi[0]) / 2), float((lo[1] + hi[1]) / 2), float(lo[2])))
-        M = pivot @ Matrix.Rotation(np.radians(chk["rot_z_deg"]), 4, "Z") @ Matrix.Scale(chk["scale"], 4) @ pivot.inverted()
+        rx = chk.get("rot_x_deg", 0.0)
+        # bas asagi cevirmede donus merkezi yukseklik ortasi (tabandan cevirmek karakteri zeminin altina atar)
+        pz = float((lo[2] + hi[2]) / 2) if rx else float(lo[2])
+        pivot = Matrix.Translation((float((lo[0] + hi[0]) / 2), float((lo[1] + hi[1]) / 2), pz))
+        M = (pivot @ Matrix.Rotation(np.radians(chk["rot_z_deg"]), 4, "Z") @ Matrix.Rotation(np.radians(rx), 4, "X")
+             @ Matrix.Scale(chk["scale"], 4) @ pivot.inverted())
         for o in objs:
             o.matrix_world = M @ o.matrix_world
         applied = True
@@ -136,7 +166,8 @@ class MPR_OT_fix_orientation(_MeshOperator, bpy.types.Operator):
             applied = False                     # multi-user mesh: world placement is still right, only not applied
         V2, _, _ = io.meshes_to_numpy(objs)
         after = ad.orientation_check(V2)
-        msg = f"Rotated {chk['rot_z_deg']:.0f}°, scale {chk['scale']}; height {after['height']:.2f} m" + ("" if applied else " (rotation/scale could not be applied)")
+        flip = " flipped upright," if rx else ""
+        msg = f"Rotated{flip} {chk['rot_z_deg']:.0f}°, scale {chk['scale']}; height {after['height']:.2f} m" + ("" if applied else " (rotation/scale could not be applied)")
         if after["problems"]:
             self.report({"WARNING"}, msg + " — remaining: " + "; ".join(after["problems"]))
         else:
@@ -208,10 +239,12 @@ class MPR_OT_weights(_MeshOperator, bpy.types.Operator):
         t0 = time.time()
         msgs = []
         if s.engine == "TRANSFER":
-            W, _ = pl.transfer_pipeline(V, F, tpl, fit, s.ref_body, s.merge_face, s.merge_roll, s.merge_mh,
-                                        use_votes=s.use_votes, head_parts=s.head_parts, log=msgs.append)
+            W, _ = pl.transfer_pipeline(V, F, tpl, fit, s.ref_body, not s.detail_face, s.merge_roll, s.merge_mh,
+                                        use_votes=s.use_votes, head_parts=s.head_parts, merge_fingers=not s.detail_fingers, log=msgs.append)
         else:
             W, _ = pl.voxel_pipeline(V, F, tpl, fit, s.merge_roll, log=msgs.append)
+            if not s.detail_fingers:
+                W = pl.apply_remap(W, tpl, pl.remap_rules(tpl.names, merge_face=not s.detail_face, merge_fingers=True))
         idx, val = pl.finalize(W, tpl)
         raw = io.bone_raw_names(arm, tpl)
         io.write_weights(ranges, raw, idx, val)

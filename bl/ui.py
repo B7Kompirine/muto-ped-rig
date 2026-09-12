@@ -24,6 +24,13 @@ class MPR_PT_main(bpy.types.Panel):
         r.operator("mpr.markers_auto", icon="VIEWZOOM")
         r.operator("mpr.markers_add", icon="ADD")
         r = b.row(align=True)
+        c = r.row(align=True)
+        c.enabled = s.detail_fingers
+        c.prop(s, "hand_template", icon="HAND")
+        c = r.row(align=True)
+        c.enabled = s.detail_face
+        c.prop(s, "face_template", icon="USER")
+        r = b.row(align=True)
         r.operator("mpr.markers_mirror", icon="MOD_MIRROR")
         r.prop(s, "mirror_x", text="X")
         b.prop(s, "marker_size")
@@ -44,7 +51,9 @@ class MPR_PT_main(bpy.types.Panel):
         if s.engine == "TRANSFER":
             b.prop(s, "ref_body")
             b.prop(s, "use_votes")
-        b.prop(s, "merge_face")
+        r = b.row(align=True)
+        r.prop(s, "detail_fingers", toggle=True, icon="HAND")
+        r.prop(s, "detail_face", toggle=True, icon="USER")
         b.prop(s, "merge_roll")
         b.prop(s, "merge_mh")
         b.prop(s, "head_parts")
