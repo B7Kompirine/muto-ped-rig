@@ -34,15 +34,46 @@ NEUTRAL_DIFF = (0.5, 0.5, 0.5, 1.0)
 TEX_MAX = 2048
 
 
+# Sahne TXD'si (Scene.sz_txds) ve export_ytds_include ilk Sollumz 2.9.0'da; create_shader v2.3.0-v2.9.0 hep
+# ydr/shader_materials.py'de (GitHub etiketleri tarandi, 2026-09-12).
+SOLLUMZ_MIN = (2, 9, 0)
+
+
+def _version_text(version):
+    return ".".join(str(v) for v in version) if version else "?"
+
+
+def sollumz_package():
+    """Etkin Sollumz'un paket adi ve surumu. Ad kurulum yoluna gore degisir: eski addon 'Sollumz' (klasor adi; GitHub kaynak
+    zip'inde 'Sollumz-main'), extension 'bl_ext.<depo>.sollumz' (user_default, blender_org, ozel depo). Sabit iki adla aramak
+    uzak kullanicida (Blender 5.1 + Sollumz 2.9.0) 'Sollumz not found' verdi -> etkin eklentiler arasinda son ad parcasiyla aranir."""
+    import sys
+    import addon_utils
+    for name in bpy.context.preferences.addons.keys():
+        last = name.rsplit(".", 1)[-1].lower()
+        if last == "sollumz" or last.startswith(("sollumz-", "sollumz_")):
+            module = sys.modules.get(name)
+            try:
+                version = tuple(addon_utils.module_bl_info(module).get("version", ())) if module else ()
+            except Exception:
+                version = ()
+            return name, version
+    return None, ()
+
+
 def _create_shader(filename):
-    """Sollumz iki kurulum yolunda farkli modul adi tasir (atlas: arac-tuzaklari §2)."""
-    for mod in ("Sollumz.ydr.shader_materials", "bl_ext.user_default.sollumz.ydr.shader_materials"):
-        try:
-            m = __import__(mod, fromlist=["create_shader"])
-            return m.create_shader(filename)
-        except ImportError:
-            continue
-    raise RuntimeError("Sollumz not found (create_shader)")
+    import importlib
+    name, version = sollumz_package()
+    if name is None:
+        raise RuntimeError("Sollumz is not enabled: Edit > Preferences > Add-ons / Get Extensions > enable Sollumz "
+                           f"{_version_text(SOLLUMZ_MIN)}+")
+    if version and version < SOLLUMZ_MIN:
+        raise RuntimeError(f"Sollumz {_version_text(version)} is too old: Muto Ped Rig needs Sollumz {_version_text(SOLLUMZ_MIN)}+")
+    try:
+        create = importlib.import_module(name + ".ydr.shader_materials").create_shader
+    except (ImportError, AttributeError) as e:
+        raise RuntimeError(f"Sollumz found ({name} {_version_text(version)}) but create_shader could not be loaded: {e}") from e
+    return create(filename)
 
 
 def _base_color_image(mat):

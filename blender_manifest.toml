@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "muto_ped_rig"
-version = "0.2.0"
+version = "0.2.1"
 name = "Muto Ped Rig"
 tagline = "Rig humanoid characters to the GTA V ped skeleton for FiveM"
 maintainer = "muto"
