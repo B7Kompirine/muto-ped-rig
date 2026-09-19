@@ -37,6 +37,15 @@ IN_MARGIN = 0.1              # reddedilir (15 eklemde ~2 eklem). Dis = genellest
                              # yapisir, ileri kalinti dusuk kalir) fark xbot L 0,33, readyplayerme L 0,13, dune 0,67 / 0,47; GTA ates 0
 IN_MIRROR = 0.1              # tek el ic kapisindan donerse ve cekirdek yol simetrikse (asimetri / el boyu < IN_MIRROR) diger el de reddedilir
 IN_RAD = 1.6                 # ic testi yuz secimi: (Hand + Finger22) / 2 merkezli, IN_RAD x el boyu (ucgen merkezi)
+FINGER_LEN_FIX = True        # parmak boyu duzeltmesi (tests/an_finger_length.py): kalip GTA segment oranini tasir -> uzun parmakta Finger?1/?2
+FINGER_LEN_MARGIN = 0.1      # koke yigilir (Tripo zombi uc payi 0,62-0,73, GTA 0,27-0,29). Parmak basina s = hedef uc / kalip uc (kok ekseni);
+FINGER_LEN_REACH = 0.7       # |s - 1| > MARGIN ise ?1/?2 kokten s ile olceklenir (0,6..2,5). Hedef nokta kalip vertexine < REACH x el boyu.
+FINGER_LEN_REVERT = True     # olceklenen el ic kapisindan donup ham el geciyorsa ham el kullanilir (sf_wendiir R 10,56 -> 5,85 cm; diger 9
+#                              karakter, zombi, GTA degismez). Parmak basina ic testi REDDEDILDI: sf_eric kazanci gider (1,33 -> 1,68), zombi
+#                              pencesi ince (ham eklemler de disarida) -> 2-4 parmak geri alinir.
+                             # Olculdu 2026-09-13 (4 govde x 2 poz x el varyanti, GT eklem cm): uzun 0,882 -> 0,556 (eklem2 1,62 -> 0,86), kisa
+                             # 0,623 -> 0,590, kivrik 0,773 -> 0,733, acik 0,529 -> 0,518, buyuk el 0,936 -> 0,917, vanilla 0,247 AYNI; > 0,1 cm
+                             # kotulesen el 0. MARGIN 0,05: uzun 0,509 ama kivrik 5 el kotu. Zombi: s 1,45-2,15, uc payi 0,46-0,64 -> 0,20-0,24.
 LAM_AUG, MU_SCALE = 0.2, 0.5 # aday skoru = kalinti * (1 + LAM_AUG*|aci|/30) * (1 + MU_SCALE*|ln(s/s0)|) (tests/an_hand_select.py, LOBO)
 REGION = 1.3                 # hedef bolge: (Hand + Finger22) / 2 merkezli, REGION x el boyu yaricap
 EXCLUDE = set()              # test (LOO / el ailesi): atlanacak referanslar
@@ -140,6 +149,41 @@ def _inside_reject(o_t, o_c):
     return o_t[0] / o_t[1] > o_c[0] / o_c[1] + IN_MARGIN
 
 
+def _finger_scale(J, X, lab, dst, L):
+    """Parmak basina s (5,): hedef parmak ucu / kalip parmak ucu izdusumu, kok Finger?0 -> Finger?2 ekseninde. Hedef nokta en yakin kalip
+    vertexinin etiketini alir (Finger?1/?2 bolgesi) ve ona < FINGER_LEN_REACH x L olmalidir; olculemeyen parmak 1."""
+    d, nn = GridKNN(X, cell=KNN_CELL * L).nearest(dst)
+    tl = lab[nn]
+    s = np.ones(5)
+    for f in range(5):
+        j0, j2 = J[1 + 3 * f], J[1 + 3 * f + 2]
+        a = j2 - j0
+        n = float(np.linalg.norm(a))
+        if n < 1e-9:
+            continue
+        a = a / n
+        reg = (1 + 3 * f + 1, 1 + 3 * f + 2)
+        tm = np.isin(lab, reg)
+        gm = np.isin(tl, reg) & (d < FINGER_LEN_REACH * L)
+        if tm.any() and gm.any():
+            p_tpl = float(((X[tm] - j0) @ a).max())
+            if p_tpl > 1e-9:
+                s[f] = float(((dst[gm] - j0) @ a).max()) / p_tpl
+    return s
+
+
+def _apply_finger_scale(J, s):
+    """|s - 1| > FINGER_LEN_MARGIN olan parmakta Finger?1/?2 kokten (Finger?0) s ile olceklenir (0,6..2,5 kirpilir)."""
+    J = np.array(J, float)
+    for f in range(5):
+        if abs(s[f] - 1.0) > FINGER_LEN_MARGIN:
+            k = float(np.clip(s[f], 0.6, 2.5))
+            j0 = J[1 + 3 * f].copy()
+            for j in (1, 2):
+                J[1 + 3 * f + j] = j0 + k * (J[1 + 3 * f + j] - j0)
+    return J
+
+
 def _score(res, ang, sr):
     return res * (1.0 + LAM_AUG * np.abs(ang) / 30.0) * (1.0 + MU_SCALE * np.abs(np.log(np.maximum(sr, 1e-6))))
 
@@ -230,12 +274,15 @@ def _ref_hands(tpl, key):
     for S in ("L", "R"):
         cols = np.array([rs.index[f"SKEL_{S}_Hand"]] + [rs.index[f"SKEL_{S}_{j}"] for j in JOINTS])
         sel = (WV * np.isin(WI, cols)).sum(1) > 0.5
+        # vertex etiketi: baskin agirlik kemigi (0 = Hand, 1 + 3f + j = Finger{f}{j}) -> parmak boyu duzeltmesi (_finger_scale)
+        lab = np.stack([(WV[sel] * (WI[sel] == c)).sum(1) for c in cols], 1).argmax(1)
         hb, tip = rs.index[f"SKEL_{S}_Hand"], rs.index[f"SKEL_{S}_Finger22"]
         augs = []
         for ang, Pt in poses.items():
             Pa = lbs(Vr[sel], WI[sel], WV[sel], Pt @ inv) if ang else Vr[sel]
             augs.append((ang, np.asarray(Pa, float), Pt[cols, :3, 3]))
-        out[S] = dict(R=rs.W[hb, :3, :3], h=rs.W[hb, :3, 3], L=float(np.linalg.norm(rs.W[tip, :3, 3] - rs.W[hb, :3, 3])), augs=augs)
+        out[S] = dict(R=rs.W[hb, :3, :3], h=rs.W[hb, :3, 3], L=float(np.linalg.norm(rs.W[tip, :3, 3] - rs.W[hb, :3, 3])), augs=augs,
+                      lab=lab)
     _CACHE[ck] = out
     return out
 
@@ -301,14 +348,21 @@ def hand_markers(V, markers, tpl, log=None, F=None):
             s1, R1, t1, r1 = _icp(Pa, knn, dst, float(s[c]), R[c], t[c], ITERS, TRIM)
             sc = float(_score(r1, ang, s1 / s0))
             if best is None or sc < best[0]:
-                best = (sc, key, ang, roll, Ja * s1 @ R1.T + t1, r1, sh)
+                best = (sc, key, ang, roll, Ja * s1 @ R1.T + t1, r1, sh, Pa, s1, R1, t1)
         if best is None:
             continue
-        _, key, ang, roll, J, res, sh = best
+        _, key, ang, roll, J, res, sh, Pa, s1, R1, t1 = best
+        fscale, J_raw = None, J
+        if FINGER_LEN_FIX:
+            # parmak boyu: kalip GTA segment oranini tasir, uzun parmakta Finger?1/?2 koke yigilir (FINGER_LEN_FIX notu)
+            fscale = _finger_scale(J, Pa * s1 @ R1.T + t1, refs[key][S]["lab"], dst, L)
+            J = _apply_finger_scale(J, fscale)
         dev = [float(np.linalg.norm(J[7 + j] - np.asarray(markers[f"{S}_f2{j}"], float))) / L for j in range(3) if f"{S}_f2{j}" in markers]
         # mid_dev_L: sablon orta parmak zinciri <-> cekirdek yol (mesh ucundan) en buyuk sapma / el boyu (kapi tanisi)
         LAST[S] = dict(ref=key, aug=ang, roll=roll, shift=sh, res_mm=res * 1000, res_L=res / L, n_cand=len(items),
                        mid_dev_L=max(dev) if dev else None)
+        if fscale is not None:
+            LAST[S]["finger_scale"] = [round(float(v), 3) for v in fscale]
         if res / L > RES_GATE:
             if log:
                 log(f"{S} hand template rejected (residual {res * 1000:.1f} mm)")
@@ -316,8 +370,13 @@ def hand_markers(V, markers, tpl, log=None, F=None):
         if Fa is not None:
             # ic testi: dogru oturan elde eklemler parmagin icinde (kaynak rig'ler hep ic); bozuk oturmada sablon avucun altina kayar
             Fh = Fa[np.sum((tri_c - (w0 + t0) / 2) ** 2, axis=1) < (IN_RAD * L) ** 2]
-            core = [markers.get(f"{S}_f{f}{j}", (np.nan,) * 3) for f in range(5) for j in range(3)]
+            core =[markers.get(f"{S}_f{f}{j}", (np.nan,) * 3) for f in range(5) for j in range(3)]
             o_t, o_c = _outside(J[1:], V, Fh), _outside(core, V, Fh)
+            if FINGER_LEN_REVERT and IN_GATE and _inside_reject(o_t, o_c) and not np.array_equal(J, J_raw):
+                o_r = _outside(J_raw[1:], V, Fh)
+                if not _inside_reject(o_r, o_c):
+                    J, o_t = J_raw, o_r
+                    LAST[S]["finger_revert"] = True
             LAST[S].update(out_tpl=o_t, out_core=o_c)
             if IN_GATE and _inside_reject(o_t, o_c):
                 LAST[S]["rejected"] = "inside"

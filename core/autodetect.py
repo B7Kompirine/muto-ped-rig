@@ -162,6 +162,12 @@ def vanilla_ratios(tpl):
 
 TARGET_HEIGHT = 1.8          # birim oranina uymayan boy bu boya olceklenir (GTA ped ~1,8 m)
 UPSIDE_DOWN_CHECK = True
+# Ayak izi onceligi (kural v4, 2026-09-13, tests/an_upside_down.py): alt %1 dilim vertex sayisi VE alt %4 dilim xy alani, ustekinin
+# UPSIDE_FOOT_K katindan buyukse DIK; tersi ise BAS ASAGI; ikisi birden net degilse v3. Neden: Tripo AI zombi (ince govde, dizlere inen
+# pence, agir ayakkabi) v3'te dik -> "bas asagi" (genislik orani 1,53), ters -> kacirildi (merkez 0,526). 117 model x (dik + ters):
+# v3 yanlis alarm 1 + kacirilan 3 (zombi, vanilla a_m_o_beach_01 apose/a35) -> K 2 ve 3: 0 + 0 (K 3 daha az vakada karar verir: 44/234),
+# K 4: zombi yine yanlis.
+UPSIDE_FOOT_K = 3.0
 
 
 def _upside_down(V, lo, hi, H):
@@ -177,24 +183,43 @@ def _upside_down(V, lo, hi, H):
     if n < 50 or H <= 1e-9:
         return False
     rel = (V[:, 2] - lo[2]) / H
+
+    def area(sel):
+        return float(np.ptp(sel[:, 0]) * np.ptp(sel[:, 1])) if len(sel) >= 10 else 0.0
+    top, bot = V[rel > 0.96], V[rel < 0.04]
+    n_top, n_bot = int((rel > 0.99).sum()) + 1, int((rel < 0.01).sum()) + 1
+    a_top, a_bot = area(top) + 1e-12, area(bot) + 1e-12
+    if UPSIDE_FOOT_K > 0:                               # v4: ayak izi iki ipucunda birden net -> yon ondan (UPSIDE_FOOT_K notu)
+        if n_bot > UPSIDE_FOOT_K * n_top and a_bot > UPSIDE_FOOT_K * a_top:
+            return False
+        if n_top > UPSIDE_FOOT_K * n_bot and a_top > UPSIDE_FOOT_K * a_bot:
+            return True
     if float(rel.mean()) >= 0.50:
         return False
 
     def width(a, b):
         m = (rel > a) & (rel < b)
         return float(np.percentile(V[m, 0], 98) - np.percentile(V[m, 0], 2)) if m.sum() > 20 else 0.0
-
-    def area(sel):
-        return float(np.ptp(sel[:, 0]) * np.ptp(sel[:, 1])) if len(sel) >= 10 else 0.0
     w_lo, w_hi = width(0.1, 0.4), width(0.6, 0.9)
     wide = w_hi > 0 and w_lo > 1.1 * w_hi
-    flat = (int((rel > 0.99).sum()) + 1) > 2 * (int((rel < 0.01).sum()) + 1)
-    top, bot = V[rel > 0.96], V[rel < 0.04]
-    foot = (area(top) + 1e-12) > 2 * (area(bot) + 1e-12)
+    flat = n_top > 2 * n_bot
+    foot = a_top > 2 * a_bot
     return bool(wide or flat or foot)
 
 
-def orientation_check(V, h_min=0.8, h_max=3.0):
+# Yon ipucu v3 (2026-09-13): YAN EKSEN ust govde bandinin (0,60-0,85 H) genis ekseni (omuz genisligi > gogus derinligi); ON ISARETI
+# taban - ayak bilegi farkinin YALNIZ on-arka eksen bileseni. Eski 2B kural tek bacak uzun karakterde (kisa bacagin ayagi havada, taban
+# diliminde tek ayak) yan farki parmak yonu saniyordu: DOGRU modele -90 derece dedi, Fix Orientation cevirdi (rig_variants
+# tek_bacak_uzun_15 dokumu boyle kaydedilmisti); winter_soldier kisa_bacak_30 90/180/270 derece donukken "sorun yok" (fark < 0,01 H).
+# 468 vaka (36 vanilla + 80 dokum + zombi x 0/90/180/270): eski 445, v3 468. Paylar: genislik orani en az 1,21 (cesiumman buyuk_kafa_40),
+# |on farki| en az 0,0038 H (xbot tek_bacak_uzun_15). Reddedilen: ayak basina 2B (vanilla mp_m 90/180 bozuldu, 453), parmak-topuk uzantisi
+# (464). Oran HEADING_LAT_RATIO altindaysa eski kural. Arac: scratchpad heading_cue.py / heading_cue3.py.
+HEADING_LATERAL = True
+HEADING_LAT_RATIO = 1.1
+HEADING_MIN_D = 0.002
+
+
+def orientation_check(V, h_min=0.8, h_max=3.0, target_height=None):
     """Algilamadan once: dik mi, boy metre mi, -Y'ye mi bakiyor. Sessiz basarisizligi onler — sentetik GTA disi govdede
     (2026-09-11) +Y'ye bakan karakterde butun operatorler FINISHED dondu ama L/R yer degistirdi (uzuv uyumu %0, marker 17-113 cm);
     cm biriminde agirlik 3.7 -> 64 s ve export 180 m'lik ped olurdu.
@@ -224,6 +249,12 @@ def orientation_check(V, h_min=0.8, h_max=3.0):
             out["problems"].append(f"height {H:.2f} m; must be between {h_min} and {h_max} m — it will be scaled to {TARGET_HEIGHT:.2f} m")
         else:
             out["problems"].append(f"height {H:.2f} m; must be between {h_min} and {h_max} m")
+    if target_height and H > 1e-6 and abs(H - target_height) > 0.005 * target_height:
+        # kullanici hedef boyu (Scene.mpr.target_height, 0 = kapali) birim/aralik olceginin yerine gecer. Neden (2026-09-13): zombi 0,98 m
+        # birim normalize geldi, 2,2 m elle olceklendi; toplu islemde boy secimi arayuzden olmali.
+        out["problems"] = [p for p in out["problems"] if not p.startswith("height")]
+        out["scale"] = round(target_height / H, 6)
+        out["problems"].append(f"height {H:.2f} m; target height {target_height:.2f} m — it will be scaled by {out['scale']}")
     if UPSIDE_DOWN_CHECK and _upside_down(V, lo, hi, H):
         # bas asagi karakter yon kontrolunu SESSIZCE geciyordu (Sketchfab Goblin rotx -90: marker 50,8 cm, bolge %23) -> X etrafinda 180
         out["rot_x_deg"] = 180.0
@@ -233,7 +264,17 @@ def orientation_check(V, h_min=0.8, h_max=3.0):
     ank = V[(V[:, 2] > lo[2] + 0.06 * H) & (V[:, 2] < lo[2] + 0.10 * H)]
     if len(sole) >= 8 and len(ank) >= 8:
         d = sole[:, :2].mean(0) - ank[:, :2].mean(0)
-        if np.linalg.norm(d) > 0.01 * H:
+        ok = np.linalg.norm(d) > 0.01 * H
+        if HEADING_LATERAL:
+            rel = (V[:, 2] - lo[2]) / H
+            U = V[(rel > 0.60) & (rel < 0.85)]
+            if len(U) >= 20:
+                w = [float(np.percentile(U[:, a], 98) - np.percentile(U[:, a], 2)) for a in (0, 1)]
+                if max(w) >= HEADING_LAT_RATIO * min(w):          # v3 (HEADING_LATERAL notu): on-arka eksen = dar eksen
+                    fwd = 1 if w[0] >= w[1] else 0
+                    d = np.where(np.arange(2) == fwd, d, 0.0)
+                    ok = abs(float(d[fwd])) > HEADING_MIN_D * H
+        if ok:
             head = float(np.degrees(np.arctan2(d[0], -d[1])))
             out["heading_deg"] = head
             if abs(head) > 45:
@@ -250,8 +291,17 @@ NECK_MIN_REL = 0.2      # boyun adayi: ust govde merkez genisliginin en az bu or
 # varyanti BIREBIR ayni, kalibrasyon dosyasi degismedi (tests/run_flag.py ile A/B).
 HAND_TIP_REFINE = True
 HAND_TIP_R = 0.15
+# Ayni uzuv siniri: HAND_TIP_R icindeki aday, secilen uca voxel (geodezik) yoluyla da yakin olmali: yol <= HAND_TIP_GEO x HAND_TIP_R x H.
+# Neden (2026-09-13): Tripo AI zombi — dizlere inen pence uyluga 11-14 cm; 14,7 cm yaricapta uyluk voxeli (G 59) el ucundan (G 55) uzak
+# sayildi -> sag el ucu bacaga tasindi, kol govdenin icinden cizildi (kol kaldirinca govde surukleniyor), zincir "Clean" dedi. 0 = kapali.
+HAND_TIP_GEO = 2.5
 NECK_ABOVE_WIDEST = True    # boyun adayi omuz/kol bandinin altindaysa bandin ustundeki en ince katman (False = eski min())
 HIP_BACK_DEP = 0.15         # z_crotch kasik ipucu tabanindan bu kadar (x H) ayrisirsa 'back' ipucu atilir (0 = kapali)
+# Bacak zemini: ayak bilegi / taban / ayak parmagi yuksekligi o TARAFIN en alt vertexinden (False = govdenin en alti). Neden (2026-09-13):
+# rig_variants tek_bacak_uzun_15 (sol bacak x1,15) -> kisa bacagin ayagi havada, bilek kesiti boy oraniyla yerde aranir -> 5 modelin 4'unde
+# "R leg cross-section not found". Olculdu (scratchpad leg_floor_ab.py, yon kontrolu atlanarak): 80 dokum hata 4 -> 0 (kurtulanlar 3,60-4,92
+# cm, base bandi), cesiumman tek_bacak 5,27 -> 4,61, digerleri |fark| <= 0,1, ort 4,367 -> 4,359; 36 vanilla 2,123 -> 2,124, hata yok.
+LEG_SIDE_FLOOR = True
 # Govde orta hatti x. "bbox" = sinir kutusu ortasi (eski). Tek kolu uzun karakterde kutu uzun kola kayar (rig_variants tek_kol_uzun_35:
 # xbot boyun 55, kafa 36 cm). "trunk" = govde bandindaki (0.45-0.75 H) en derin (erozyon) voxellerin medyan x'i: kollar ince, govde
 # en derin. Olculdu 2026-09-12 (80 gercek model dokumu, BIN_SNAP_XC ile): tek_kol_uzun_35 satir ort 8,56 -> 4,30 cm (xbot 10,71 ->
@@ -858,8 +908,13 @@ def detect(V, F, tpl, h_div=140, log=print):
         gP = G[ii, jj, kk]
         for hi_ in (hL, hR):
             e = ends[hi_]
-            ge = G[tuple(np.clip(grid.index(e[None])[0], 0, grid.dims - 1))]
+            ei = np.clip(grid.index(e[None])[0], 0, grid.dims - 1)
+            ge = G[tuple(ei)]
             near = np.nonzero(np.linalg.norm(P - e, axis=1) < HAND_TIP_R * H)[0]
+            if len(near) and HAND_TIP_GEO > 0:
+                Ge = geodesic_bfs(solid, ei)                  # ayni uzuv: uca voxel yolu kisa (HAND_TIP_GEO notu)
+                g_near = Ge[ii[near], jj[near], kk[near]]
+                near = near[(g_near >= 0) & (g_near <= HAND_TIP_GEO * HAND_TIP_R * H / h)]
             if len(near):
                 k = near[int(np.argmax(gP[near]))]
                 if gP[k] > ge:
@@ -1025,7 +1080,9 @@ def detect(V, F, tpl, h_div=140, log=print):
     for side, fi in (("L", fL), ("R", fR)):
         sgn = 1.0 if side == "L" else -1.0
         tip = ends[fi]
-        ankle = leg_centroid(sgn, zof(rat["z_ankle"]))
+        on_side = sgn * (Vw[:, 0] - xc) > 0
+        z0 = float(Vw[on_side, 2].min()) if LEG_SIDE_FLOOR and on_side.any() else float(lo[2])      # LEG_SIDE_FLOOR notu
+        ankle = leg_centroid(sgn, z0 + rat["z_ankle"] * H)
         # diz (v7): ayak bilegi -> kalca arasinda bacak-ici oran 0.4942 (84 vaka, GT kalcayla std 1.05 cm);
         # boy orani uzun/kisa bacakta +-4.8 cm kaydi.
         knee = leg_centroid(sgn, ankle[2] + 0.4942 * (z_hip - ankle[2])) if ankle is not None else None
@@ -1040,14 +1097,14 @@ def detect(V, F, tpl, h_div=140, log=print):
         # ayak TABANI (mesh vertexleri, z < %3 boy): on uc (-Y) -> topuk. 12 vanilla govde olcumu (2026-09-11):
         # Toe0 on uctan %25 geride (std 0.056), x taban medyaninda (+0.002H), z 0.0265H; ayak bilegi y %79 (std 0.029).
         # v3'te uc noktasina dayali tahmin sisman/fit govdelerde 12-13 cm kaydi.
-        sole = (Vw[:, 2] < lo[2] + 0.03 * H) & (sgn * (Vw[:, 0] - xc) > 0)
+        sole = (Vw[:, 2] < z0 + 0.03 * H) & on_side
         if sole.sum() >= 8:
             ymin, ymax = float(Vw[sole, 1].min()), float(Vw[sole, 1].max())
             xmed = float(np.median(Vw[sole, 0]))
-            toe = np.array([xmed + sgn * 0.002 * H, ymin + 0.25 * (ymax - ymin), lo[2] + 0.0265 * H])
+            toe = np.array([xmed + sgn * 0.002 * H, ymin + 0.25 * (ymax - ymin), z0 + 0.0265 * H])
             ankle = np.array([ankle[0], ymin + 0.786 * (ymax - ymin), ankle[2]])
         else:
-            toe = np.array([ankle[0], tip[1] + rat["toe_fwd"] * (ankle[1] - tip[1]), zof(rat["z_toe"])])
+            toe = np.array([ankle[0], tip[1] + rat["toe_fwd"] * (ankle[1] - tip[1]), z0 + rat["z_toe"] * H])
         out[f"{side}_ankle"], out[f"{side}_knee"], out[f"{side}_hip"], out[f"{side}_toe"] = ankle, knee, hip, toe
         hips[side] = hip
 

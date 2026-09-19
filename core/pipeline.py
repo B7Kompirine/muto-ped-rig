@@ -244,6 +244,10 @@ def transfer_pipeline(Vt, Ft, tpl, fit, ref_key="auto", merge_face=True, merge_r
     dist = D[refs.index(base)]
     if use_votes and len(refs) > 1:
         P, agree, om = tr.votes_from_doms(doms, D, sigma=0.015 * fit.g)
+        # REDDEDILDI (2026-09-13, Blender bone-heat / Auto-Rig Pro fikri, out/arp_study/BULGULAR.md #1): uzuv oyuna kemik GORUNURLUK
+        # kapisi. 12 vanilla govde LOO: normal testi (en yakin kemik noktasi yuzeyin onunde, cos > tau) net vertexin GT grubunu %8-11
+        # yanlis eler; ucgen isin testi %25-59 engelli; ikisi birlikte %4.6-12.5 ve 530 kotu vertexin en cok 63'unu kurtarir.
+        # Sert kapi + yuzey doldurma: %95 0.71 -> 0.84 (kotu), max ort 132 -> 115 (genfat bel yani 261 -> 177).
         P = tr.smooth_probs(P, edges, lam=lam)
         Wg = W * P[:, grp]
         s = Wg.sum(1)
@@ -283,6 +287,183 @@ def transfer_pipeline(Vt, Ft, tpl, fit, ref_key="auto", merge_face=True, merge_r
     W = apply_remap(W, tpl, remap_rules(tpl.names, merge_face, merge_roll, merge_mh, merge_fingers=merge_fingers))
     log(f"  aktarim: temel={base}, {len(Vw)} birlesik vertex, referansa mesafe %95 {np.percentile(dist, 95)*1000:.1f} mm, "
         f"guven<0.5 %{(conf < 0.5).mean()*100:.1f}, {time.time()-t0:.1f}s")
+    return W[inv], dist[inv]
+
+
+def animal_refs(data_dir, tpl):
+    """data_dir'deki ayni iskelet ailesinden (species.family) referans anahtarlari."""
+    from .species import family
+    fam = family(tpl)
+    keys = sorted(f[4:-4] for f in os.listdir(data_dir) if f.startswith("ref_") and f.endswith(".npz"))
+    return [k for k in keys if os.path.exists(os.path.join(data_dir, f"template_{k}.json"))
+            and family(Skeleton.from_json(os.path.join(data_dir, f"template_{k}.json"))) == fam]
+
+
+ANIMAL_BEST_MM = 18.0     # auto: en yakin referansin medyan mesafesi bunun (x g) altindaysa tek referans, ustundeyse harman + son islem
+# On bacak alt zinciri yeniden paylastirma — VARSAYILAN KAPALI (2026-09-13). LOO (paw_chain_ab / ab2, 11 ayri mesh, 11 tek eklem pozu):
+# konum %95 11,68 -> 11,15, on bacak kotu kenar % 1,640 -> 1,448, kotulesen hedef 0. Tani: aktarilan kemik SINIRI yakin kemige kaymis
+# (Hand vertexlerinin %22'si Forearm). AMA Sollumz emote (gercek klipler, 4 klip ort. en kotu kare kotu kenar %; zincirsiz / m 0,15 /
+# m 0,35 / m 0,15 yari): cakal 12,79 / 13,11 / 13,03 / 13,26, geyik 11,32 / 10,66 / 11,86 / 11,26 -> cakal hicbir varyantta
+# duzelmiyor (gerilme ayak ucundan on kola kayiyor) -> REDDEDILDI. Ayrica REDDEDILDI: arka bacak alt zinciri (LOO 3 hedef kotu), ust
+# zincirler (diz pozu 7,1 -> 9,7), eski agirlikla yari karisim (LOO + emote kotu).
+ANIMAL_FRONT_CHAINS = (("Forearm", "Hand", "Finger00", "Finger01"),)
+ANIMAL_LIMB_CHAINS = None
+ANIMAL_LIMB_MARGIN = 0.15
+
+
+def rechain_limbs(W, V, tpl, P, chains=ANIMAL_FRONT_CHAINS, m=ANIMAL_LIMB_MARGIN):
+    """Zincir vertexi (zincir kemik payi > 0,5) hedef iskeletin zincir segmentlerine izdusumle: segment ici -> o kemik, eklemin +-m
+    cevresi -> iki kemik dogrusal karisim. Zincir disi agirlik ve zincir payi korunur. P: hedef eklem konumlari (B,3)."""
+    W = W.copy()
+    for S in ("L", "R"):
+        for chain in chains:
+            ids = [tpl.index[f"SKEL_{S}_{c}"] for c in chain]
+            pts = [P[i] for i in ids]
+            pts.append(pts[-1] + 0.75 * (pts[-1] - pts[-2]))            # son kemigin ucu (weights.bone_segments ile ayni)
+            share = W[:, ids].sum(1)
+            sel = np.nonzero(share > 0.5)[0]
+            if not len(sel):
+                continue
+            X, C = V[sel], len(ids)
+            D = np.full((len(sel), C), np.inf)
+            T = np.zeros((len(sel), C))
+            for k in range(C):
+                ab = pts[k + 1] - pts[k]
+                traw = ((X - pts[k]) @ ab) / max(float(ab @ ab), 1e-12)
+                t = np.clip(traw, 0, 1)
+                D[:, k] = np.linalg.norm(X - (pts[k] + t[:, None] * ab), axis=1)
+                T[:, k] = traw
+            rows = np.arange(len(sel))
+            k = D.argmin(1)
+            t = T[rows, k]
+            up = (t < m) & (k > 0)
+            dn = (t > 1 - m) & (k < C - 1) & ~up
+            mid = ~(up | dn)
+            new = np.zeros((len(sel), C))
+            new[rows[mid], k[mid]] = 1.0
+            wu = 0.5 + 0.5 * np.maximum(t[up], 0.0) / m
+            new[rows[up], k[up]], new[rows[up], k[up] - 1] = wu, 1 - wu
+            wd = 0.5 + 0.5 * np.maximum(1 - t[dn], 0.0) / m
+            new[rows[dn], k[dn]], new[rows[dn], k[dn] + 1] = wd, 1 - wd
+            W[np.ix_(sel, ids)] = new * share[sel, None]
+    return W
+
+
+# Bas bolgesi yerel afin aktarim (2026-09-13, scratchpad head_affine_ab / ab2, out/animals/head_affine_ab*_0913.txt; oracle iskelet,
+# 11 hayvan, pozlar FB_Jaw 3 eksen + Head). Tani: global aktarim cogu hayvanda alt ceneyi SKEL_Head'e veriyor (GT FB_Jaw vertexlerinin
+# FB_Jaw orani: boar / coyote / deer / mtlion %0, cow %3, pig %5, retriever %11, shepherd %22; iyi yalniz husky %49, rottweiler %89).
+# Yontem: her referansin bas bolgesi (Head / FB_) yuz eklemleri uzerinden en kucuk kareler afiniyle hedef yuz eklemlerine tasinir, bas
+# vertexleri en yakin yuzeyden alir, bas vertexi medyan mesafesi en kucuk tek referans. Cene uyumu %16,3 -> 57,9, poz %95 30,27 ->
+# 21,72, AMA rottweiler 6,9 -> 12,0. Koruma: tabanda bas vertexlerinin FB_Jaw baskin orani >= ANIMAL_HEAD_JAW_Q ise (global aktarim
+# ceneyi zaten bulmus) dokunulmaz; rottweiler %23 / husky %24 korunur -> hedef basina degerlerden %59,9 / 22,53, kotulesen 0.
+# ESIK AYNI VERIDEN (coyote %14 ile rottweiler %23 arasi). REDDEDILDI: secimi bas vertexi referans mesafesiyle yapmak (afini yalniz
+# rottweiler'da seciyor; ort 30,74).
+# KORUMA KALDIRILDI (2026-09-14, scratchpad head_affine_q_rest.py): referans fit'i yardimci kemikte izotrop olunca (fit_skeleton aux_iso)
+# genel aktarimin cene payi degisti ve artik ayirmiyor: geyik %22,4 / husky %24,0 / cakal %28,9'da afin IYI (yuz pozu %95 8,4 -> 5,4 /
+# 29,1 -> 15,1 / 25,9 -> 6,3), rottweiler %23,2'de KOTU (6,9 -> 12,0). 11 hedef cene uyumu % / yuz %95 mm: q 0,2 %54,7 / 23,30 · hep afin
+# %60,1 / 20,44 (duzeltme oncesi kod %59,9 / 22,52). 1,0 = her zaman (tamamen cene olan bas kumesi haric).
+ANIMAL_HEAD_AFFINE = True
+ANIMAL_HEAD_JAW_Q = 1.0
+ANIMAL_FACE_JOINTS = ("SKEL_Head", "FB_Jaw", "FB_L_Eye", "FB_R_Eye", "FB_L_Ear", "FB_R_Ear", "FB_L_Lip_Corner", "FB_R_Lip_Corner",
+                      "FB_Brow_Centre", "FB_L_CheekBone", "FB_R_CheekBone", "FB_L_Brow_Out", "FB_R_Brow_Out")
+
+
+def head_affine_weights(W, Vw, Fw, tpl, fit, refs_data, jaw_q=ANIMAL_HEAD_JAW_Q):
+    """W (birlesik uzay) bas vertexlerini referans bas afin aktarimiyla degistir. refs_data: [(Vr, Fr, WIr, WVr, ref_skel)].
+    Donus: (W, uygulandi mi, taban cene payi)."""
+    ij = tpl.index.get("FB_Jaw")
+    headset = np.array([n == "SKEL_Head" or n.startswith("FB_") for n in tpl.names])
+    hv = headset[W.argmax(1)]
+    if ij is None or not hv.any():
+        return W, False, 0.0
+    share = float((W[hv].argmax(1) == ij).mean())
+    if share >= jaw_q:
+        return W, False, share
+    tj = [n for n in ANIMAL_FACE_JOINTS if n in tpl.index]
+    best, best_med = None, np.inf
+    for Vr, Fr, WIr, WVr, rs in refs_data:
+        common = [n for n in tj if n in rs.index]
+        if len(common) < 6:
+            continue
+        src = np.hstack([rs.pos[[rs.index[n] for n in common]], np.ones((len(common), 1))])
+        A, *_ = np.linalg.lstsq(src, fit.P_W[[tpl.index[n] for n in common], :3, 3], rcond=None)
+        top = WIr[np.arange(len(Vr)), WVr.argmax(1)]
+        Vd = np.hstack([Vr, np.ones((len(Vr), 1))]) @ A
+        Vd[~headset[top]] += 1000.0                                   # bas disi referans yuzeyi sorguya karismasin
+        Wr, dist, _ = tr.transfer_weights(Vw, Fw, Vd, Fr, WIr, WVr, len(tpl.names), spacing=0.004 * fit.g)
+        m = float(np.median(dist[hv]))
+        if m < best_med:
+            best, best_med = Wr, m
+    if best is None:
+        return W, False, share
+    W = W.copy()
+    W[hv] = best[hv]
+    return W, True, share
+
+
+def animal_transfer_pipeline(Vt, Ft, tpl, fit, data_dir, exclude=(), mode="auto", post=True, merge_face=False, tail_blend=True,
+                             limb_chains=ANIMAL_LIMB_CHAINS, head_affine=ANIMAL_HEAD_AFFINE, log=print):
+    """Hayvan hedefi: ayni ailedeki oyun hayvanlarinin agirliklari hedef iskelete esnetilip aktarilir. Donus: W (N,B), mesafe (N,).
+
+    Olcek: referans IZOTROP global olcekle (fit.g) esnetilir. fit.scale eksen olcekleri hayvan referansinda patliyor: domuz -> yaban domuzu
+    omurga z 8,25, deforme referans 2 m yukari tasti (poz %95 123 mm; izotrop 26; puma <- rottweiler 139 -> 12; 2026-09-13).
+    mode: 'soft' referans mesafesine gore harman (+ post), 'best' medyan mesafesi en kucuk tek referans, 'auto' ikisinden biri.
+    Olculdu (LOO, 11 ayri oyun hayvani mesh'i, oracle iskelet, 11 poz, %95 / max ort mm): tek en iyi 13,44 / 254, harman+son 13,97 / 212,
+    auto 11,62 / 235 (harman: yaban domuzu x2, inek; en yakin medyan 20-31 mm, digerleri 7-15). ESIK AYNI VERIDEN secildi (15,4 ile 20,1
+    arasi bosluk).
+    tail_blend (LOO v2, out/animals/loo_weights_v2_0913): tek referansta kuyruk %95 46,5; tek referans + harman+son'un KUYRUK kemik
+    payiyla yumusak karisimi 12,9 (genel 13,44 -> 13,20, max 254 -> 227). Auto ile birlikte hedef basina degerlerden 11,68 / 208 (auto
+    11,62 / 235). REDDEDILDI: ayni karisimi on bacaga da uygulamak (auto_hibrit 11,89; ayni rest'li kopeklerde bozuyor, husky 0,7 -> 3,6)."""
+    import time
+    t0 = time.time()
+    B = len(tpl.names)
+    targets = {n: fit.P_W[tpl.index[n], :3, 3] for n in tpl.names if n.startswith("SKEL_")}
+    Vw, Fw, inv = vx.weld(Vt, Ft)
+    refs = [k for k in animal_refs(data_dir, tpl) if k not in exclude]
+    if not refs:
+        raise ValueError("no animal weight references found")
+    per, dists = [], []
+    for key in refs:
+        Vr, Fr, WIr, WVr, ref_skel = load_reference(key, tpl, data_dir)
+        fr = fit_skeleton(ref_skel, targets, aux_iso=True)      # yardimci (FB_) kemik de izotrop: fit_skeleton aux_iso notu
+        Vrd = tr.deform_reference(Vr, WIr, WVr, ref_skel.W, fr.P_W, np.full_like(fr.scale, fr.g))
+        W, dist, _ = tr.transfer_weights(Vw, Fw, Vrd, Fr, WIr, WVr, B, spacing=0.004 * fit.g)
+        per.append(W)
+        dists.append(dist)
+    D = np.stack(dists)
+    med = np.median(D, axis=1)
+    dist = D.min(0)
+    if mode == "auto":
+        mode = "best" if med.min() < ANIMAL_BEST_MM / 1000 * fit.g else "soft"
+    W_soft = None
+    if mode == "soft" or tail_blend:
+        wr = np.exp(-((D - dist[None]) / (0.015 * fit.g)) ** 2)
+        W_soft = np.einsum("rn,rnb->nb", wr, np.stack(per)) / wr.sum(0)[:, None]
+        if post:
+            edges = wt.mesh_edges(Fw)
+            W_soft = tr.side_clamp(W_soft, tpl.names, Vw, fit.P_W[tpl.index["SKEL_Spine2"], 0, 3])
+            W_soft = tr.lr_resolve(W_soft, tpl.names, Vw, fit.P)
+            bad = tr.group_islands(W_soft, edges, tr.bone_groups(tpl.names), vx.mesh_components(len(Vw), Fw))
+            W_soft = wt.graph_fill(W_soft, np.where(bad, 0.0, tr.confidence(dist, fit.g)), edges)
+    if mode == "best":
+        W = per[int(med.argmin())]                      # olculen varyant: tek referans son islemsiz
+        if tail_blend:
+            tail = np.array(["Tail" in n for n in tpl.names])
+            a = W_soft[:, tail].sum(1, keepdims=True)   # harmanin kuyruk kemik payi kadar harmana gecilir
+            W = a * W_soft + (1 - a) * W
+    else:
+        W = W_soft
+    # merge_face=True REDDEDILDI (2026-09-13, emote toplam kotu kenar: yaban domuzu 12,876 -> 12,901, cakal / geyik ayni): domuz cene
+    # yirtilmasi yuzden boyun_kafa'ya kaydi; kok neden FB_Jaw'in oynamasi degil, cene vertexlerinin Head + kismi FB_Jaw karisimi
+    W = apply_remap(W, tpl, remap_rules(tpl.names, merge_face=merge_face))
+    if limb_chains:
+        W = rechain_limbs(W, Vw, tpl, fit.P_W[:, :3, 3], limb_chains)   # birlesik vertex = ayni konum -> orijinalle esdeger
+    head_note = ""
+    if head_affine and not merge_face:
+        W, applied, share = head_affine_weights(W, Vw, Fw, tpl, fit, [load_reference(k, tpl, data_dir) for k in refs])
+        head_note = f", bas afin {'uygulandi' if applied else 'atlandi'} (taban cene payi %{share * 100:.0f})"
+    log(f"  hayvan aktarimi: {len(refs)} referans ({mode}), en yakin {refs[int(med.argmin())]} med {med.min()*1000:.1f} mm, "
+        f"{len(Vw)} birlesik vertex{head_note}, {time.time()-t0:.1f}s")
     return W[inv], dist[inv]
 
 

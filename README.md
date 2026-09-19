@@ -20,7 +20,7 @@ Written from scratch; contains no Auto-Rig Pro code.
 |---|---|---|
 | 0 | **Remove Existing Rig** (models that come with a rig) | Removes the old Mixamo / Unreal / Sketchfab rig: parent (world transform kept), armature modifier, vertex groups, shape keys; deletes the old armature if nothing uses it. Facial shape keys are lost; Ctrl+Z undoes it. Not needed for unrigged models. |
 | 0 | **Fix Orientation/Scale** | If the character does not face -Y (most FBX/GLB files face +Y), turns it around Z in 90° steps based on the feet; flips an upside-down character; rescales centimeters/millimeters to meters and any other height outside 0.8–3 m to 1.8 m; applies the transform (Ctrl+Z undoes it). |
-| 1 | **Auto Markers** (or *Add Markers*) | Checks orientation and height first and stops with the reason if something is off. Finds the joints; drag the spheres to adjust. *Mirror L > R* copies the left side to the right. |
+| 1 | **Auto Markers** or **Click Key Points** | Auto Markers checks orientation and height first and stops with the reason if something is off, then finds the joints; drag the spheres to adjust. Click Key Points: click head, neck, shoulders, wrists, hips and ankles on the mesh, the rest is filled in. **Fingers** / **Face** turn those joints on or off. *Mirror L > R* copies the left side to the right. Rarely needed tools (Add Markers, Markers from Existing Rig, templates, marker size) are under *More Marker Tools*; weight and export settings under *Weight Options* / *Export Options*. |
 | 2 | **Fit Skeleton** | Builds the 128-bone freemode skeleton in the character's own pose (names, tags, parents and count never change). |
 | 3 | **Compute Weights** | Transfers vanilla ped weights to the character; 12 vanilla bodies vote on the limbs. |
 | 4 | **Convert to GTA Rest Pose** | Moves the mesh and skeleton into the GTA rest pose with vanilla rotations (required for T-pose characters). |
@@ -32,6 +32,38 @@ The character must **stand upright, face -Y and be in meters** (in Blender's fro
 *Fix Orientation/Scale* turns the character to face -Y, converts centimeters/millimeters, flips an upside-down character, and scales any
 other height outside 0.8–3 m (e.g. a 51 m Sketchfab export) to **1.8 m**, the height of a GTA ped. Characters inside that range keep their size.
 Select only the body: a weapon or prop that sticks out (e.g. an axe held over the head) changes the height and can confuse the detection.
+
+## Animation (Retarget)
+
+Open *Animation (Retarget)*, pick the **Source** armature that carries the animation (Mixamo, Unreal, Biped, Rigify or NVIDIA SOMA bone
+names) and a **Clip**, choose **Root Motion** and press **Retarget to GTA**. The clip is baked onto `MPR_AnimRig`, the vanilla ped
+skeleton in GTA rest pose; your character's `MPR_Rig` is not changed, and the clip plays the same on any ped.
+
+- T-pose / A-pose difference is corrected per bone (GTA arms rest 57° below horizontal); limbs get rotations only, `SKEL_Pelvis`,
+  `SKEL_Spine_Root` and expression-driven helper bones are never keyed.
+- 30 fps: a clip imported at another frame rate is resampled by time, so its duration stays the same.
+- *Root Motion (Mover)* moves the hips' horizontal path to the GTA mover track (walking / running); *In Place* drops the path;
+  *Rotations Only* writes no root position (emotes).
+- Finger bones that never move in the source are left at the GTA hand pose. Mixamo has 3 spine joints, so `SKEL_Spine3` stays at rest.
+- Checked against the measured retarget pipeline it comes from: identical rotations (0.000° over 1,110 keys), a T-pose source gives the
+  same limb directions (0.000°), no forbidden channels.
+
+**Export Clip Dictionary** writes every retargeted clip into `<Dictionary>.ycd.xml` in the Output Folder and reads the file back
+(clip names, clip → animation links, frame counts, root motion flag). The report lists the names to use with `TaskPlayAnim`
+(dictionary = the Dictionary field, clip = the clip name). Sollumz writes clip dictionaries only as XML: convert the `.ycd.xml` to
+`.ycd` with CodeWalker, put it in your resource's `stream` folder, then leave and rejoin the server (a restart is not enough). Body
+bones the source does not animate (e.g. `SKEL_Spine3`) are keyed at their rest pose so they do not keep the previous animation's pose;
+fingers are left to the ped's current hand pose. Measured: re-importing the written file gives the same pose (0.000°), and the
+CodeWalker-compiled `.ycd` reads back with the same clips.
+
+## Ped Scaler (compiled peds)
+
+A second panel in the **Muto Rig** tab, closed by default. It resizes a ped that is already exported: pick its `.yft.xml` and
+`.ydd.xml` (Sollumz / CodeWalker XML), press *Tespit et* (it recognises the species and the current scale), set the target and press
+*Olcegi uygula*. Skeleton and every mesh part are scaled together; a backup is written first (*Yedekten geri al* restores it). The default
+ground formula is mairon 4.1 (tested in game); *Muto zemin duzeltmesi* is only for rigs from this add-on with non-vanilla proportions
+(not tested in game). To build a new character at a given height, use *Target Height* in the rig panel instead.
+If the old separate `muto_ped_scaler.py` is still enabled, this panel is skipped: disable the old one.
 
 ## Measured accuracy (against vanilla bodies)
 
@@ -101,8 +133,9 @@ Select only the body: a weapon or prop that sticks out (e.g. an axe held over th
 
 - **Reference Body**: Automatic (best-matching male/female freemode body) · Male · Female.
 - **Multi-Body Limb Voting** (on): a single body's wrong limb decision is outvoted.
-- **Fingers** (on): weights the 30 finger bones and places the finger joints from the mesh. Off: finger weights go to the hand bone (the
-  fingers move with the hand as one piece); the finger bones still exist, so the skeleton stays valid.
+- **Fingers** (on): weights the 30 finger bones and places the finger joints from the mesh. Off: no finger markers, the finger bones
+  are hidden in Blender and their weights go to the hand bone (the fingers move with the hand as one piece). The bones stay in the
+  exported skeleton (128 bones either way): every GTA human ped has them and animations expect them.
 - **Hand Template** (on, needs *Fingers*): *Auto Markers* fits the vanilla GTA hand meshes to the character's hands and takes the 15
   finger joints from the best fit (a few extra seconds). A hand whose fitted finger joints fall outside the hand mesh (more of them than
   with the mesh-based fingers) keeps the mesh-based fingers; on a symmetric character the other hand does too. Off: finger joints come
@@ -110,7 +143,8 @@ Select only the body: a weapon or prop that sticks out (e.g. an axe held over th
 - **Face Template** (on, needs *Face*): *Auto Markers* fits the vanilla GTA head meshes to the character's head and places the 22 face
   bones from the best fits (several extra seconds). Off: the face bones follow the head with the template's offsets.
 - **Face** (on): weights the 19 animated face bones (jaw, lips, eyes, lids, brows, cheeks, tongue) from the vanilla references that carry
-  face weights. Off: all face weights go to `SKEL_Head` (no facial animation); the face bones still exist.
+  face weights. Off: no face markers, the face bones are hidden in Blender and all face weights go to `SKEL_Head` (no facial
+  animation); the bones stay in the exported skeleton.
 - **Attach Hair/Hats to Head** (on): parts separate from the body that rise above the head (hair strands, hats, glasses) get Head/Spine3
   by height (ramp measured on Rockstar hair drawables). A separately modeled head object is left untouched.
 - **Disable Roll Bones** (off): `RB_` twist distribution like vanilla. In game the `RB_` bones are driven by expressions — the ped's
@@ -143,9 +177,8 @@ Select only the body: a weapon or prop that sticks out (e.g. an axe held over th
 
 ## Known limits
 
-- ⚠️ Add-on peds from this add-on currently print an F8 script error when the client calls `SetPedDefaultComponentVariation`
-  (the model still loads, animates and shows its textures). A hand-made add-on ped package does not → the cause is in the
-  generated `peds.meta` / `.ymt`, still under investigation. *Replace Vanilla Ped* has no such error.
+- Add-on peds exported before this version crash in `CreatePed` / `SetPedDefaultComponentVariation` (F8 script error): their
+  `.ydd` carried no skeleton. Fixed — the `head_000_r` drawable now carries it, like vanilla peds. Export older add-on peds again.
 - Characters with one leg longer than the other (feet at different heights) are not supported: the markers end up far off or detection
   stops with "leg cross-section not found" → place the markers by hand (resized-skeleton test, 5 models).
 - Shoulder joints moved well outside the torso outline (e.g. arms mounted wide on a robot) are not followed: with the shoulders moved out

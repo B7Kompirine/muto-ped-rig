@@ -42,6 +42,15 @@ def label(key):
     return f"{side} {LABELS.get(rest, rest)}"
 
 
+def is_finger_key(key):
+    """L_f00 .. R_f42: parmak eklemi marker'i."""
+    return len(key) == 5 and key[0] in "LR" and key[1:3] == "_f" and key[3:].isdigit()
+
+
+def is_face_key(key):
+    return key.startswith(("FB_", "FACIAL_"))
+
+
 def mirror_key(key):
     if key.startswith("L_"):
         return "R_" + key[2:]
@@ -143,4 +152,31 @@ def initial_guess(tpl, lo, hi, vanilla_lo, vanilla_hi, keys=None):
         arm = any(x in k for x in ("elbow", "wrist", "f0", "f1", "f2", "f3", "f4"))
         sx = s_x if arm else s_h
         out[k] = c_t + rel * np.array([sx, s_h, s_h])
+    return out
+
+
+# Manuel yerlestirme (2026-09-13, Auto-Rig Pro'nun uzuv kilavuzundan yontem, kod degil): kullanici bir uzuv zincirinin ucunu (omuz/bilek,
+# kalca eklemi/ayak bilegi) surukleyince ara eklem (dirsek/diz) segment benzerlik donusumuyle (ayni boy orani + en kucuk donus) tasinir.
+# Olculdu 80 dokum (out/bench_var_dump; uc marker'lar GT'ye cekilir, hata = DOKUNULMAYAN eklemler, tests/an_anchor_propagate.py):
+# bilek+ayak bilegi 4,733 -> 4,529 cm (vaka 71 iyi / 1 kotu), boyun+pelvis+omuz+bilek+kalca+ayak bilegi 4,155 -> 3,643 (61/10),
+# yalniz omuzlar 4,119 -> 4,090 (37/25). REDDEDILDI: parmaklari onkol/bilek donusuyle tasimak (f21 2,9 -> 4,4 cm, f22 2,0 -> 3,9),
+# bas ve ayak parmagini otelemek (kotulesti) -> yalniz dirsek ve diz yayilir.
+LINKED = {f"{s}_{mid}": (f"{s}_{a}", f"{s}_{b}") for s in LR for mid, a, b in (("elbow", "shoulder", "wrist"), ("knee", "hip", "ankle"))}
+
+
+def propagate_linked(before, after, eps=1e-4):
+    """before: son yerlestirmedeki konumlar, after: simdiki -> {dirsek/diz anahtari: yeni konum}. Kullanicinin kendi tasidigi ara eklem korunur."""
+    from .fit import rot_between
+    moved = lambda k: float(np.linalg.norm(np.asarray(after[k], float) - np.asarray(before[k], float))) > eps
+    out = {}
+    for mid, (a, b) in LINKED.items():
+        if any(k not in before or k not in after for k in (mid, a, b)) or moved(mid) or not (moved(a) or moved(b)):
+            continue
+        a0, b0, a1, b1, p = (np.asarray(x, float) for x in (before[a], before[b], after[a], after[b], before[mid]))
+        u0, u1 = b0 - a0, b1 - a1
+        n0, n1 = np.linalg.norm(u0), np.linalg.norm(u1)
+        if n0 < 1e-9 or n1 < 1e-9:
+            out[mid] = p + (a1 - a0)
+        else:
+            out[mid] = a1 + (n1 / n0) * (rot_between(u0 / n0, u1 / n1) @ (p - a0))
     return out

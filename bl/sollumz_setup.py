@@ -254,14 +254,95 @@ def _as_model(obj, parent, arm, mat_cache, tex_dir=None):
     mod.object = arm
 
 
+# Ped LOD (2026-09-14, scratchpad ped_lod_survey.py; CodeWalker XML a_m_y_hipster_01 + a_m_y_beach_01, 16 cizim): vanilla her ana cizimde
+# High + Medium + Low, kucuk aksesuar yalniz High + Medium. Ucgen: Medium 382-788 (High 1260-3634 iken: High'in 0,14-0,54'u), Low 59-118
+# (0,02-0,08) -> High boyundan bagimsiz MUTLAK hedef. LodDist hepsi 9998 (ped'de LOD gecisi cizim mesafesiyle degil) -> dokunulmaz.
+# Vanilla Medium / Low shader'i ped_default (Tangent / TexCoord1 yok); burada High'in materyali kalir. 0.3.1 yalniz High yaziyordu
+# (topluluk: add-on ped ~15 m'de bozuluyor, forum.cfx.re "addon ped distance lod bug"). OYUNDA DENENMEDI.
+LOD_TARGET_TRIS = (("medium", 600), ("low", 100))
+# Hayvan (tum geometri tek cizim head_000_r): vanilla ana govde cizimi High / Medium / Low ucgen (res_to_xml + ped_lod_survey, 2026-09-14):
+# a_c_coyote 4348 / 1052 / yok · a_c_boar 2420 / 1162 / yok · a_c_deer 5204 / 1118 / 310 -> Medium ~1100, Low ~300 (geyik; olmayan ped'de
+# de yazilir: kaba LOD hic LOD olmamasindan iyi varsayimi, OYUNDA DENENMEDI). Insan hedefi (600 / 100) hayvanda vanilla'dan 2-3 kat kaba.
+LOD_TARGET_TRIS_ANIMAL = (("medium", 1100), ("low", 300))
+
+
+def _tri_count(me):
+    return sum(len(p.vertices) - 2 for p in me.polygons)
+
+
+def _limit_influences(obj, me, k=4):
+    """Decimate birlesen vertexlerin agirliklarini karistirir: LOD'da 4'ten fazla etkili vertex (hipster Low ust govde %32, 2026-09-14
+    tools/t_lod_export_check.py). Sollumz dosyaya en agir 4'u 255'e normalize yazar; ayni kural burada uygulanir -> sahne = dosya."""
+    for v in me.vertices:
+        gs = sorted(((g.group, g.weight) for g in v.groups if g.weight > 0.0), key=lambda x: -x[1])
+        if not gs:
+            continue
+        keep = gs[:k]
+        tot = sum(w for _, w in keep)
+        for gi, _ in gs[k:]:
+            obj.vertex_groups[gi].remove([v.index])
+        if tot > 0:
+            for gi, w in keep:
+                obj.vertex_groups[gi].add([v.index], w / tot, "REPLACE")
+
+
+def add_lods(root, targets=LOD_TARGET_TRIS):
+    """root (sozluk) altindaki her cizim modeline decimate (collapse) ile Medium / Low mesh'i. Modelin kopyasi (vertex gruplari ayni sirada)
+    armature'suz decimate edilir, sonuc mesh o seviyeye baglanir -> Sollumz ayni grup adlariyla okur; decimate'in karistirdigi 4'ten fazla
+    etkiyi export en agir 4 + 255'e normalize ile yazar (Sollumz ydr/vertex_buffer_builder). High hedefin altindaysa o seviye yazilmaz.
+    Donus {model adi: {seviye: ucgen}}."""
+    rep = {}
+    models = [o for o in root.children_recursive if o.type == "MESH" and o.sollum_type == "sollumz_drawable_model"]
+    for o in models:
+        hi = o.sz_lods.high.mesh or o.data
+        n_hi = _tri_count(hi)
+        rep[o.name] = {"high": n_hi}
+        for lvl, tgt in targets:
+            if n_hi <= tgt:
+                continue
+            tmp = o.copy()
+            tmp.data = hi.copy()
+            tmp.modifiers.clear()
+            bpy.context.scene.collection.objects.link(tmp)
+            mod = tmp.modifiers.new("mpr_lod", "DECIMATE")
+            mod.decimate_type = "COLLAPSE"
+            mod.ratio = max(tgt / n_hi, 0.001)
+            mod.use_collapse_triangulate = True
+            bpy.context.view_layer.update()
+            dg = bpy.context.evaluated_depsgraph_get()
+            me = bpy.data.meshes.new_from_object(tmp.evaluated_get(dg), preserve_all_data_layers=True, depsgraph=dg)
+            me.name = f"{o.name}.{lvl}"
+            if len(me.materials) == 0:
+                for m in hi.materials:
+                    me.materials.append(m)
+            tmp_data = tmp.data
+            tmp.data = me
+            _limit_influences(tmp, me)
+            bpy.data.objects.remove(tmp, do_unlink=True)
+            bpy.data.meshes.remove(tmp_data)
+            getattr(o.sz_lods, lvl).mesh = me
+            rep[o.name][lvl] = _tri_count(me)
+    return rep
+
+
 def _link(obj, coll):
     for c in list(obj.users_collection):
         c.objects.unlink(obj)
     coll.objects.link(obj)
 
 
-def _split_by_region(src, tpl, raw_names, coll):
-    """Mesh'i baskin agirlik bolgesine gore head/uppr/lowr kopyalarina ayir."""
+def _bake_world(o, T):
+    """Kopya mesh'in dunya donusumunu (ebeveyn + nesne konum / donus / olcek) veriye yazar ve T ile tasir; nesne kimlik, ebeveynsiz.
+    Neden: Sollumz .ydd mesh'ine nesne donusumunu UYGULAR, .yft iskeletine armature nesne donusumunu UYGULAMAZ -> rig + mesh birlikte
+    tasinmis sahnede dosyada iskelet mesh'in 1 m altinda (tools/t_scale_export_check.py move: yft ayak - ydd taban -99,4 cm, 2026-09-13)."""
+    M = T @ o.matrix_world
+    o.parent = None
+    o.data.transform(M, shape_keys=True)
+    o.matrix_world.identity()
+
+
+def _split_by_region(src, tpl, raw_names, coll, T):
+    """Mesh'i baskin agirlik bolgesine gore head/uppr/lowr kopyalarina ayir; kopyalar T @ dunya uzayina pisirilir (_bake_world)."""
     V, F, ranges = io.meshes_to_numpy([src])
     idx, val = io.read_weights(ranges, raw_names)
     vreg = comp.vertex_regions(idx, val, tpl.names)
@@ -275,6 +356,7 @@ def _split_by_region(src, tpl, raw_names, coll):
         o.data = src.data.copy()
         o.name = f"{src.name}.{comp.DEFAULT_COMPONENTS[r].split('_')[0]}"
         coll.objects.link(o)
+        _bake_world(o, T)
         bm = bmesh.new()
         bm.from_mesh(o.data)
         bm.faces.ensure_lookup_table()
@@ -287,10 +369,20 @@ def _split_by_region(src, tpl, raw_names, coll):
     return out
 
 
+# .yft "skel" yer tutucusu vanilla ile ayni: z=0'da 25 vertexlik duz izgara, +-12,5 m, SKEL_ROOT'a bagli. Veri (2026-09-13, CodeWalker XML):
+# mp_m_freemode_01 / mp_f_freemode_01 / player_zero / a_m_y_hipster_01 .yft Drawable + Fragment BoundingBox +-12,5 (z 0), BoundingSphereRadius
+# 17,6777. Eski 1 cm'lik kupte 0,0087 m idi. Sollumz sinirlari bu geometriden hesaplar.
+SKEL_GRID_HALF = 12.5
+
+
 def _placeholder(name, coll):
     me = bpy.data.meshes.new(name + "_high")
     bm = bmesh.new()
-    bmesh.ops.create_cube(bm, size=0.01)
+    xs = [SKEL_GRID_HALF * (i / 2.0 - 1.0) for i in range(5)]
+    vs = [[bm.verts.new((x, y, 0.0)) for x in xs] for y in xs]
+    for j in range(4):
+        for i in range(4):
+            bm.faces.new((vs[j][i], vs[j][i + 1], vs[j + 1][i + 1], vs[j + 1][i]))
     bm.to_mesh(me)
     bm.free()
     o = bpy.data.objects.new(name, me)
@@ -300,12 +392,36 @@ def _placeholder(name, coll):
     return o
 
 
+def _export_armature(rig, name, data_name, sollum_type, coll, W, tpl):
+    """Rig kopyasi: nesne kimlik + ebeveynsiz, kemikler W (GTA model uzayi, dunya) ile yazilir."""
+    a = rig.copy()
+    a.data = rig.data.copy()
+    a.name = name
+    a.data.name = data_name
+    a.sollum_type = sollum_type
+    for k in ("mpr_fit", "mpr_stage"):
+        if k in a:
+            del a[k]
+    coll.objects.link(a)
+    a.parent = None
+    a.matrix_world.identity()
+    io.set_rest(a, W, tpl)
+    return a
+
+
 def build_hierarchy(ped_name, meshes, components=comp.DEFAULT_COMPONENTS, tex_dir=None):
+    from mathutils import Matrix
     rig = bpy.data.objects.get(io.RIG_NAME)
     if rig is None or rig.get("mpr_stage") != "G":
         raise RuntimeError("MPR_Rig must be in the GTA rest pose (G): run 'Convert to GTA Rest Pose' first")
     tpl = io.template()
     raw_names = io.bone_raw_names(rig, tpl)
+    from ..core.species import family
+    animal = family(tpl) == "quad"
+    if animal:
+        # hayvan: insan head/uppr/lowr bolge kurali (kemik adlarina gore) uymaz; her dort ayakli ped'de head_000_r cizimi var
+        # (18 oyun ped'i, t_animal_ref parca listeleri) -> tum geometri oraya. Oyunda denenmedi.
+        components = ("head_000_r",)
     coll = bpy.data.collections.get(COLL)
     if coll is None:
         coll = bpy.data.collections.new(COLL)
@@ -314,17 +430,18 @@ def build_hierarchy(ped_name, meshes, components=comp.DEFAULT_COMPONENTS, tex_di
     for o in list(coll.objects):
         bpy.data.objects.remove(o, do_unlink=True)
     mat_cache = {}
+    # GTA MODEL UZAYI (vanilla ile ayni): SKEL_ROOT sablon konumuna -> insan tabani -1,0; hayvan kendi ped'inin oyun tabani (kok - taban
+    # mesafesini export oncesi rig_root_offset kurar). Iskelet ve mesh DUNYA uzayinda (nesne konum / donus / olcek dahil) ayni T ile
+    # pisirilir, export nesneleri kimlik. Veri (2026-09-13, tools/t_scale_export_check.py + t_scale_export_readback.py): rig + mesh
+    # orijin etrafinda x1,5 -> dosyada taban -1,5 (kok -0,52); karakter Blender zemininde (ayak z=0) -> taban 0, kok +0,96 (zombi, Winter
+    # Soldier export'lari); uygulanmamis nesne tasimasi -> iskelet mesh'in 99 cm altinda. Kok izi olmayan klipte ped vanilla koku bekler.
+    W = io.rig_world_matrices(rig, tpl)
+    r = tpl.index["SKEL_ROOT"]
+    T = Matrix.Translation([float(v) for v in tpl.pos[r] - W[r, :3, 3]])
+    W = np.array(T) @ W
 
     # --- .yft: fragment ---
-    frag = rig.copy()
-    frag.data = rig.data.copy()
-    frag.name = ped_name
-    frag.data.name = ped_name + "_skel"
-    frag.sollum_type = "sollumz_fragment"
-    for k in ("mpr_fit", "mpr_stage"):
-        if k in frag:
-            del frag[k]
-    coll.objects.link(frag)
+    frag = _export_armature(rig, ped_name, ped_name + "_skel", "sollumz_fragment", coll, W, tpl)
     fdraw = bpy.data.objects.new(ped_name + ".mesh", None)
     coll.objects.link(fdraw)
     fdraw.parent = frag
@@ -333,25 +450,32 @@ def build_hierarchy(ped_name, meshes, components=comp.DEFAULT_COMPONENTS, tex_di
     _as_model(ph, fdraw, frag, mat_cache, tex_dir)
 
     # --- .ydd: sozluk (armature = deri iskeleti) ---
-    dic = rig.copy()
-    dic.data = rig.data.copy()
-    dic.name = ped_name
-    dic.data.name = ped_name + "_dict_skel"
-    dic.sollum_type = "sollumz_drawable_dictionary"
-    for k in ("mpr_fit", "mpr_stage"):
-        if k in dic:
-            del dic[k]
-    coll.objects.link(dic)
+    dic = _export_armature(rig, ped_name, ped_name + "_dict_skel", "sollumz_drawable_dictionary", coll, W, tpl)
     draws = []
     for cname in components:
-        d = bpy.data.objects.new(cname, None)
-        coll.objects.link(d)
+        # head_000_r ARMATURE cizim: Sollumz yalniz ARMATURE cizime .ydd'de Skeleton yazar (yddexport: child.type != "ARMATURE" ->
+        # skeleton None). Vanilla a_m_y_hipster_01 .ydd'de head_000_r Skeleton 98 kemik, calisan add-on sauron'da da; bizimkinde hic
+        # cizimde Skeleton yoktu ve her add-on ped'imiz CreatePed / SetPedDefaultComponentVariation'da coktu (GTAProcess+6A9518,
+        # 2026-09-18, CodeWalker YddFile okumasi).
+        if cname == "head_000_r":
+            d = _export_armature(rig, cname, ped_name + "_head_skel", "sollumz_drawable", coll, W, tpl)
+        else:
+            d = bpy.data.objects.new(cname, None)
+            coll.objects.link(d)
         d.parent = dic
         d.sollum_type = "sollumz_drawable"
         draws.append(d)
-    counts = [0, 0, 0]
+    counts = [0] * len(components)
     for src in meshes:
-        parts = _split_by_region(src, tpl, raw_names, coll)
+        if animal:
+            o = src.copy()
+            o.data = src.data.copy()
+            o.name = f"{src.name}.head"
+            coll.objects.link(o)
+            _bake_world(o, T)
+            parts = {0: o}
+        else:
+            parts = _split_by_region(src, tpl, raw_names, coll, T)
         for r, o in parts.items():
             _as_model(o, draws[r], dic, mat_cache, tex_dir)
             counts[r] += len(o.data.polygons)
@@ -361,7 +485,7 @@ def build_hierarchy(ped_name, meshes, components=comp.DEFAULT_COMPONENTS, tex_di
     for r, d in enumerate(draws):
         if counts[r] == 0:
             bpy.data.objects.remove(d, do_unlink=True)
-    return frag, dic, {components[r]: counts[r] for r in range(3)}
+    return frag, dic, {components[r]: counts[r] for r in range(len(components))}
 
 
 def _sampler_image(mat, node_name):
@@ -636,10 +760,11 @@ def write_peds_meta(path, ped_name):
     return path
 
 
-def write_test_resource(root_dir, resource, ped_name, stream_files, mode="REPLACE"):
+def write_test_resource(root_dir, resource, ped_name, stream_files, mode="REPLACE", ymt=True):
     """mode REPLACE: vanilla ped'i degistirir (oyunun peds.meta'si). ADDON: yeni model — peds.meta yazilir ve fxmanifest'te
     PED_METADATA_FILE bildirilir (oyunda henuz dogrulanmadi). Iki kipte de tek varyasyonlu <ad>.ymt akar: vanilla .ymt
-    *_001 cizimini ve _b.._e dokularini listeler, bizde yalniz 000/a var -> rastgele varyasyon bileseni gorunmez yapardi."""
+    *_001 cizimini ve _b.._e dokularini listeler, bizde yalniz 000/a var -> rastgele varyasyon bileseni gorunmez yapardi.
+    ymt=False: .ymt yazilmaz (hayvan: sablon .ymt insan bilesenlerini head/uppr/lowr listeler; oyunun kendi .ymt'si kalir)."""
     import shutil
     rdir = os.path.join(root_dir, resource)
     sdir = os.path.join(rdir, "stream")
@@ -647,7 +772,8 @@ def write_test_resource(root_dir, resource, ped_name, stream_files, mode="REPLAC
     for f in stream_files:
         shutil.copy2(f, sdir)
     addon = mode == "ADDON"
-    shutil.copy2(VARIATION_TEMPLATE, os.path.join(sdir, f"{ped_name}.ymt"))
+    if ymt:
+        shutil.copy2(VARIATION_TEMPLATE, os.path.join(sdir, f"{ped_name}.ymt"))
     if addon:
         write_peds_meta(os.path.join(rdir, "peds.meta"), ped_name)
     with open(os.path.join(rdir, "fxmanifest.lua"), "w", encoding="utf-8") as fh:
