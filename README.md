@@ -59,9 +59,9 @@ CodeWalker-compiled `.ycd` reads back with the same clips.
 ## Ped Scaler (compiled peds)
 
 A second panel in the **Muto Rig** tab, closed by default. It resizes a ped that is already exported: pick its `.yft.xml` and
-`.ydd.xml` (Sollumz / CodeWalker XML), press *Tespit et* (it recognises the species and the current scale), set the target and press
-*Olcegi uygula*. Skeleton and every mesh part are scaled together; a backup is written first (*Yedekten geri al* restores it). The default
-ground formula is mairon 4.1 (tested in game); *Muto zemin duzeltmesi* is only for rigs from this add-on with non-vanilla proportions
+`.ydd.xml` (Sollumz / CodeWalker XML), press *Detect* (it recognises the species and the current scale), set the target and press
+*Apply Scale*. Skeleton and every mesh part are scaled together; a backup is written first (*Restore Backup* restores it). The default
+ground formula is mairon 4.1 (tested in game); *Muto Ground Fix* is only for rigs from this add-on with non-vanilla proportions
 (not tested in game). To build a new character at a given height, use *Target Height* in the rig panel instead.
 If the old separate `muto_ped_scaler.py` is still enabled, this panel is skipped: disable the old one.
 

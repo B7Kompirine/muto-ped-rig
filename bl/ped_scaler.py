@@ -596,12 +596,12 @@ def notlar(d):
     """Rapora eklenecek uyarilar (bos = yok)."""
     s = ""
     if d.get("ozel"):
-        s += "  |  ozel oranli insan iskeleti (yayilim %.2f): olcek = kemik orani medyani" % d["spread"]
+        s += "  |  custom-proportioned human skeleton (spread %.2f): scale = median bone ratio" % d["spread"]
     elif d["tur"] in INSAN_TURLERI and d["spread"] > 0.02:
         if d.get("muto"):
-            s += "  |  vanilla disi oran (yayilim %.2f): zemin vanilla insan H0 %.3f ile (muto duzeltmesi)" % (d["spread"], INSAN_H0)
+            s += "  |  non-vanilla proportions (spread %.2f): ground uses the vanilla human H0 %.3f (muto fix)" % (d["spread"], INSAN_H0)
         else:
-            s += "  |  vanilla disi oran (yayilim %.2f): mairon zemini; gomulme gorursen 'Muto zemin duzeltmesi'ni ac" % d["spread"]
+            s += "  |  non-vanilla proportions (spread %.2f): mairon ground; if the ped sinks, turn on 'Muto Ground Fix'" % d["spread"]
     if d["tur"].startswith("a_c_"):
         s += ("  |  UYARI hayvan: klipler %s konumunu yazar -> kaldirma oyunda ezilir, bacaklar vanilla boya zorlanir"
               % HAYVAN_KONUM_IZI)
@@ -748,21 +748,21 @@ def move_physics(path, fizik0, once, sonra, k):
 # ---------------------------------------------------------------------------
 class PedScaleProps(PropertyGroup):
     yft_path: StringProperty(name="YFT", subtype="FILE_PATH",
-                             description=".yft.xml -- YDD kendiliginden bulunur")
+                             description=".yft.xml -- the YDD is found automatically")
     ydd_path: StringProperty(name="YDD", subtype="FILE_PATH",
-                             description="Tek .ydd.xml ya da bilesenlerin oldugu klasor")
-    target: FloatProperty(name="Hedef", default=1.0, min=0.10, max=10.0,
-                          precision=3, description="1.0 = turun kendi normal boyu")
+                             description="A single .ydd.xml, or the folder that holds the component files")
+    target: FloatProperty(name="Target", default=1.0, min=0.10, max=10.0,
+                          precision=3, description="1.0 = the species' own normal size")
     ground_mix: FloatProperty(
-        name="Zemine oturt", default=1.0, min=0.0, max=1.0, subtype="FACTOR",
-        description="1.00 = ped yere tam oturur (tutorial yontemi). "
-                    "0.00 = hic kaldirma, duz olcekleme. "
-                    "Hayvanda yirtilma gorursen 0'a cek")
+        name="Sit on Ground", default=1.0, min=0.0, max=1.0, subtype="FACTOR",
+        description="1.00 = the ped sits exactly on the ground (the tutorial method). "
+                    "0.00 = no lift at all, plain scaling. "
+                    "If an animal tears, pull this to 0")
     muto_ground: BoolProperty(
-        name="Muto zemin duzeltmesi", default=False,
-        description="KAPALI (varsayilan): mairon 4.1'in oyunda denenmis zemin formulu; vanilla disi oranli insan iskeleti reddedilir. "
-                    "ACIK: muto-ped-rig ciktilari gibi ozel oranli insan iskeletinde zemin vanilla H0 ile (Sollumz'da gomulme "
-                    "12-13 -> 1-2 cm; oyunda denenmedi)")
+        name="Muto Ground Fix", default=False,
+        description="OFF (default): mairon 4.1's ground formula, tested in game; a human skeleton with non-vanilla proportions is "
+                    "rejected. ON: for a custom-proportioned human skeleton such as a muto-ped-rig export, the ground uses the "
+                    "vanilla H0 (sinking in Sollumz 12-13 -> 1-2 cm; not tested in game)")
     detected: FloatProperty(default=-1.0)
     species: StringProperty(default="")
     info: StringProperty(default="")
@@ -833,7 +833,7 @@ def _import_pair(yft_src, ydd_srcs, workdir, from_scale, to_scale):
             scale_file(d, k, do_vertices=True, backup=False)
 
     if _sollumz_root() is None:
-        raise RuntimeError("Sollumz bulunamadi")
+        raise RuntimeError("Sollumz not found")
     once = set(bpy.data.objects.keys())
     bpy.ops.sollumz.import_assets(
         directory=workdir + os.sep,
@@ -925,25 +925,25 @@ def coz(p):
        (veri, hata) dondurur."""
     yft = bpy.path.abspath(p.yft_path)
     if not yft or not os.path.exists(yft):
-        return None, "YFT XML bulunamadi"
+        return None, "YFT XML not found"
     ydds = ydd_listesi(p)
     if not ydds:
-        return None, "YDD XML yok — mesh olceklenmezse ped bozulur"
+        return None, "No YDD XML - without scaling the mesh the ped breaks"
 
     kim = identify(read_skeleton(yft))
     if kim is None:
-        return None, "Iskelet okunamadi"
+        return None, "Could not read the skeleton"
     ozel = False
     if kim["spread"] > YAYILIM_SINIRI:
         if kim["tur"] in INSAN_TURLERI and p.muto_ground:
             # muto: ozel oranli insan iskeleti. Insan RIGS kaydi turden bagimsiz ayni -> kaldirma ekseni ve dogal cocuklar dogru.
             ozel = True
         elif kim["tur"] in INSAN_TURLERI:
-            return None, ("Vanilla disi oranli insan iskeleti (yayilim %.2f > %.2f): mairon 4.1 bunu reddeder. muto-ped-rig "
-                          "ciktisiysa 'Muto zemin duzeltmesi'ni acip tekrar dene" % (kim["spread"], YAYILIM_SINIRI))
+            return None, ("Human skeleton with non-vanilla proportions (spread %.2f > %.2f): mairon 4.1 rejects it. If this is a "
+                          "muto-ped-rig export, turn on 'Muto Ground Fix' and try again" % (kim["spread"], YAYILIM_SINIRI))
         else:
-            return None, ("Tur taninamadi (en yakin %s, yayilim %.2f). "
-                          "Bilinmeyen iskelet — dosya bozulurdu."
+            return None, ("Species not recognized (closest %s, spread %.2f). "
+                          "Unknown skeleton - the file would be corrupted."
                           % (kim["tur"], kim["spread"]))
     rig = RIGS.get(kim["tur"])
     if rig is None:
@@ -973,7 +973,7 @@ def coz(p):
 
     h0 = (z_root - taban + kaldir) / k
     if not (0.05 < h0 < 5.0):
-        return None, "H0 mantiksiz (%.3f) — dosya beklenen yapida degil" % h0
+        return None, "H0 makes no sense (%.3f) - the file is not in the expected shape" % h0
 
     return {"yft": yft, "ydds": ydds, "tur": kim["tur"], "scale": k,
             "spread": kim["spread"], "n": kim["n"], "h0": h0,
@@ -985,8 +985,8 @@ def coz(p):
 # ---------------------------------------------------------------------------
 class MUTO_PEDSCALE_OT_detect(Operator):
     bl_idname = "muto_pedscale.detect"
-    bl_label = "Tespit et"
-    bl_description = "Turu ve mevcut olcegi kemik uzunluklarindan bulur"
+    bl_label = "Detect"
+    bl_description = "Work out the species and the current scale from the bone lengths"
 
     def execute(self, context):
         p = context.scene.muto_ped_scale
@@ -1003,16 +1003,16 @@ class MUTO_PEDSCALE_OT_detect(Operator):
         p.species = d["tur"]
         p.info = "%d kemik  |  H0 %.4f  |  %d mesh" % (
             d["n"], d["h0"], len(d["ydds"])) + notlar(d)
-        self.report({'WARNING'} if notlar(d) else {'INFO'}, "%s  olcek %.4f  (yayilim %.4f)"
+        self.report({'WARNING'} if notlar(d) else {'INFO'}, "%s  scale %.4f  (spread %.4f)"
                     % (d["tur"], d["scale"], d["spread"]) + notlar(d))
         return {'FINISHED'}
 
 
 class MUTO_PEDSCALE_OT_apply(Operator):
     bl_idname = "muto_pedscale.apply"
-    bl_label = "Olcegi uygula"
-    bl_description = ("Iskeleti ve tum mesh bilesenlerini hedefe getirir. "
-                      "Yedek (.bak) otomatik alinir")
+    bl_label = "Apply Scale"
+    bl_description = ("Bring the skeleton and every mesh component to the target. "
+                      "A backup (.bak) is written automatically")
 
     def execute(self, context):
         p = context.scene.muto_ped_scale
@@ -1069,7 +1069,7 @@ class MUTO_PEDSCALE_OT_apply(Operator):
         zemin = -(h0 * p.target - h0_ref) * (1.0 - p.ground_mix) * 100.0
         p.info = "%s  %.3f  |  kaldirma %+.4f  |  zemin %+.1f cm" % (
             d["tur"], p.target, kaldir, zemin)
-        self.report({'WARNING'} if notlar(d) else {'INFO'}, "%.4f -> %.4f  |  %d dosya  |  kemik %+.5f  mesh %+.5f"
+        self.report({'WARNING'} if notlar(d) else {'INFO'}, "%.4f -> %.4f  |  %d files  |  bone %+.5f  mesh %+.5f"
                     % (cur, p.target, 1 + len(ydds), kaldir, dz)
                     + "  |  BoneTransforms %d  fizik kapsul %d" % (n_bt, n_fz) + notlar(d))
         return {'FINISHED'}
@@ -1077,9 +1077,9 @@ class MUTO_PEDSCALE_OT_apply(Operator):
 
 class MUTO_PEDSCALE_OT_preview(Operator):
     bl_idname = "muto_pedscale.preview"
-    bl_label = "Sahnede karsilastir"
-    bl_description = ("Solda hedef olcekteki ped, sagda turun normal boyu. "
-                      "Dosyaya dokunmaz, sahnendeki hicbir seye dokunmaz")
+    bl_label = "Compare in Scene"
+    bl_description = ("The ped at the target scale on the left, the species' normal size on the right. "
+                      "Touches neither the files nor anything in your scene")
 
     def execute(self, context):
         p = context.scene.muto_ped_scale
@@ -1089,7 +1089,7 @@ class MUTO_PEDSCALE_OT_preview(Operator):
             self.report({'ERROR'}, err)
             return {'CANCELLED'}
         if _sollumz_root() is None:
-            self.report({'ERROR'}, "Sollumz gerekli")
+            self.report({'ERROR'}, "Sollumz is required")
             return {'CANCELLED'}
 
         _wipe_preview(p)
@@ -1125,32 +1125,32 @@ class MUTO_PEDSCALE_OT_preview(Operator):
             hepsi += n2
         except Exception as e:
             kaydet(); _wipe_preview(p)
-            self.report({'ERROR'}, "Import hatasi: %s" % e)
+            self.report({'ERROR'}, "Import error: %s" % e)
             return {'CANCELLED'}
 
         kaydet()
         uyari = ("  |  UYARI %d cizim ayni adli (CodeWalker adi cozemedi): Sollumz yalniz sonuncusunu gosterir, olcek dosyada tum "
                  "cizimlere uygulanir" % ayni_ad) if ayni_ad else ""
-        p.info = "sol %.3f  |  sag 1.000" % p.target + uyari
-        self.report({'WARNING'} if ayni_ad else {'INFO'}, "Onizleme hazir (%d obje)" % len(hepsi) + uyari)
+        p.info = "left %.3f  |  right 1.000" % p.target + uyari
+        self.report({'WARNING'} if ayni_ad else {'INFO'}, "Preview ready (%d objects)" % len(hepsi) + uyari)
         return {'FINISHED'}
 
 
 class MUTO_PEDSCALE_OT_clear_preview(Operator):
     bl_idname = "muto_pedscale.clear_preview"
-    bl_label = "Onizlemeyi temizle"
-    bl_description = "Sadece onizlemenin ekledigi objeleri siler"
+    bl_label = "Clear Preview"
+    bl_description = "Deletes only the objects the preview added"
 
     def execute(self, context):
         n = _wipe_preview(context.scene.muto_ped_scale)
-        self.report({'INFO'}, "%d obje silindi" % n)
+        self.report({'INFO'}, "%d objects deleted" % n)
         return {'FINISHED'}
 
 
 class MUTO_PEDSCALE_OT_restore(Operator):
     bl_idname = "muto_pedscale.restore"
-    bl_label = "Yedekten geri al"
-    bl_description = ".bak dosyalarini geri yukler"
+    bl_label = "Restore Backup"
+    bl_description = "Loads the .bak files back"
 
     def execute(self, context):
         p = context.scene.muto_ped_scale
@@ -1161,16 +1161,16 @@ class MUTO_PEDSCALE_OT_restore(Operator):
                 shutil.copy2(f + ".bak", f)
                 n += 1
         if not n:
-            self.report({'WARNING'}, "Yedek bulunamadi")
+            self.report({'WARNING'}, "No backup found")
             return {'CANCELLED'}
         bpy.ops.muto_pedscale.detect()
-        self.report({'INFO'}, "%d dosya geri alindi" % n)
+        self.report({'INFO'}, "%d files restored" % n)
         return {'FINISHED'}
 
 
 class MUTO_PEDSCALE_OT_preset(Operator):
     bl_idname = "muto_pedscale.preset"
-    bl_label = "Oran"
+    bl_label = "Ratio"
     value: FloatProperty(default=1.0)
 
     def execute(self, context):
@@ -1240,7 +1240,7 @@ CLASSES = (PedScaleProps, MUTO_PEDSCALE_OT_detect, MUTO_PEDSCALE_OT_apply,
 def register():
     # ayri kurulu eski muto_ped_scaler.py / mairon_ped_scaler.py ayni sinif adlarini tasir -> ikisi birden acilamaz
     if hasattr(bpy.types.Scene, "muto_ped_scale"):
-        print("Muto Ped Rig: ayri kurulu Muto Ped Scaler acik; yerlesik olcekleyici atlandi (onu kapatin)")
+        print("Muto Ped Rig: the separately installed Muto Ped Scaler is enabled; the built-in scaler was skipped (disable the old one)")
         return
     for c in CLASSES:
         bpy.utils.register_class(c)
